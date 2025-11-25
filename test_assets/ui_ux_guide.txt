@@ -1,0 +1,17 @@
+# UI/UX Guidelines
+
+## Colors
+- **Primary Action (Add to Cart)**: Blue (#2563eb)
+- **Success Action (Pay Now)**: Green (#10b981)
+- **Error Messages**: Red (#ef4444)
+- **Background**: Light Gray (#f3f4f6)
+
+## Form Validation
+- Error messages must be displayed inline below the invalid field.
+- Invalid input fields should have a red border.
+- Error text should be clearly visible in red.
+
+## Interactions
+- Hover effects on buttons (slight opacity change or lift).
+- Radio buttons should highlight the selected option text.
+- "Payment Successful" message should be a green banner.

@@ -7,6 +7,7 @@ This project is an autonomous QA agent capable of generating test cases and Sele
 - Python 3.8+
 - Chrome Browser (for Selenium)
 - Virtual Environment (created in setup)
+- .env file with Gemini api key
 
 ## Starting the Application
 

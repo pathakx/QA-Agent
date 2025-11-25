@@ -6,6 +6,7 @@ router = APIRouter()
 
 @router.post("/docs/upload")
 async def upload_doc(file: UploadFile = File(...)):
+    os.makedirs("backend/data/docs", exist_ok=True)
     path = f"backend/data/docs/{file.filename}"
     with open(path, "wb") as f:
         f.write(await file.read())
@@ -13,6 +14,7 @@ async def upload_doc(file: UploadFile = File(...)):
 
 @router.post("/html/upload")
 async def upload_html(file: UploadFile = File(...)):
+    os.makedirs("backend/data/html", exist_ok=True)
     path = f"backend/data/html/{file.filename}"
     with open(path, "wb") as f:
         f.write(await file.read())

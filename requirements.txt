@@ -1,0 +1,12 @@
+streamlit
+requests
+pandas
+fastapi
+uvicorn
+python-multipart
+pymupdf
+beautifulsoup4
+chromadb
+pydantic
+python-dotenv
+google-generativeai

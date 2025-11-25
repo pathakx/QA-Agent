@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 import os
 
-BACKEND_URL = os.getenv(BACKEND_URL)
+BACKEND_URL = os.getenv("BACKEND_URL")
 
 st.set_page_config(page_title="QA Agent", layout="wide", page_icon="🤖")
 

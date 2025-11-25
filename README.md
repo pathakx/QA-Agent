@@ -8,8 +8,10 @@ This project is an autonomous QA agent capable of generating test cases and Sele
 - Python 3.8+
 - Chrome Browser (for Selenium)
 - Virtual Environment (created in setup)
-- .env file : GEMINI_API_KEY = YOUR API KEY
-               VECTOR_DB_DIR=./chroma_db
+- .env file :
+-   GEMINI_API_KEY = YOUR API KEY &
+-   VECTOR_DB_DIR=./chroma_db &
+-   BACKEND_URL = http://localhost:8000.
 
 
 ## Starting the Application

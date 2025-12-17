@@ -1,4 +1,5 @@
 # QA Agent
+Live URL: https://qualityautomation.streamlit.app/
 
 This project is an autonomous QA agent capable of generating test cases and Selenium scripts from documentation and HTML files.
 
@@ -7,6 +8,11 @@ This project is an autonomous QA agent capable of generating test cases and Sele
 - Python 3.8+
 - Chrome Browser (for Selenium)
 - Virtual Environment (created in setup)
+- .env file :
+-   GEMINI_API_KEY = YOUR API KEY &
+-   VECTOR_DB_DIR=./chroma_db &
+-   BACKEND_URL = http://localhost:8000.
+
 
 ## Starting the Application
 
@@ -14,6 +20,9 @@ This project is an autonomous QA agent capable of generating test cases and Sele
 2.  **Activate the virtual environment**:
     *   Windows: `venv\Scripts\activate`
     *   Mac/Linux: `source venv/bin/activate`
+```
+   pip install -r requirements.txt
+```
 
 3.  **Start the Backend (FastAPI)**:
     ```bash

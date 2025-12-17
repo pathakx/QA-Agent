@@ -2,8 +2,11 @@ import streamlit as st
 import requests
 import pandas as pd
 import os
+from dotenv import load_dotenv
 
-BACKEND_URL = os.getenv("BACKEND_URL", "https://qa-agent-m91j.onrender.com")
+load_dotenv()
+
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 
 st.set_page_config(page_title="QA Agent", layout="wide", page_icon="🤖")
 
@@ -98,7 +101,7 @@ with st.sidebar:
     
     # Knowledge Base button
     kb_type = "primary" if current_page == "Knowledge Base" else "secondary"
-    if st.button("📚 Knowledge Base", key="nav_kb", type=kb_type, help="Upload and manage project files", use_container_width=True):
+    if st.button("📚 Knowledge Base", key="nav_kb", type=kb_type, help="Upload and manage project files", width="stretch"):
         st.session_state["nav_selection"] = "Knowledge Base"
         st.rerun()
     
@@ -106,7 +109,7 @@ with st.sidebar:
     
     # Test Cases button
     tc_type = "primary" if current_page == "Test Cases" else "secondary"
-    if st.button("🧪 Test Cases", key="nav_tc", type=tc_type, help="Generate and view test cases", use_container_width=True):
+    if st.button("🧪 Test Cases", key="nav_tc", type=tc_type, help="Generate and view test cases", width="stretch"):
         st.session_state["nav_selection"] = "Test Cases"
         st.rerun()
     
@@ -114,7 +117,7 @@ with st.sidebar:
     
     # Selenium Scripts button
     sel_type = "primary" if current_page == "Selenium Scripts" else "secondary"
-    if st.button("💻 Selenium Scripts", key="nav_sel", type=sel_type, help="Generate automation scripts", use_container_width=True):
+    if st.button("💻 Selenium Scripts", key="nav_sel", type=sel_type, help="Generate automation scripts", width="stretch"):
         st.session_state["nav_selection"] = "Selenium Scripts"
         st.rerun()
     
@@ -128,14 +131,17 @@ with st.sidebar:
         status = requests.get(f"{BACKEND_URL}/kb/status", timeout=2).json()
         doc_count = status.get("doc_count", 0)
         html_count = len(status.get("html_files", []))
+        embedding_count = status.get("embedding_count", 0)
     except:
         doc_count = 0
         html_count = 0
+        embedding_count = 0
     
     test_count = len(st.session_state["full_testcases"])
     
     st.metric("Documents", doc_count)
     st.metric("HTML Files", html_count)
+    st.metric("Embeddings", embedding_count)
     st.metric("Test Cases", test_count)
     
     # Workflow progress indicator
@@ -234,7 +240,7 @@ if menu == "Knowledge Base":
             doc_files = status.get("doc_files", [])
             if doc_files:
                 df_docs = pd.DataFrame({"Filename": doc_files})
-                st.dataframe(df_docs, use_container_width=True, hide_index=True)
+                st.dataframe(df_docs, width="stretch", hide_index=True)
             else:
                 st.info("No documents uploaded yet")
         
@@ -243,7 +249,7 @@ if menu == "Knowledge Base":
             html_files = status.get("html_files", [])
             if html_files:
                 df_html = pd.DataFrame({"Filename": html_files})
-                st.dataframe(df_html, use_container_width=True, hide_index=True)
+                st.dataframe(df_html, width="stretch", hide_index=True)
             else:
                 st.info("No HTML files uploaded yet")
     except:
@@ -256,7 +262,7 @@ if menu == "Knowledge Base":
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("🔨 Build Knowledge Base", type="primary", key="btn_build_kb", use_container_width=True):
+        if st.button("🔨 Build Knowledge Base", type="primary", key="btn_build_kb", width="stretch"):
             with st.spinner("Building Knowledge Base..."):
                 resp = requests.get(f"{BACKEND_URL}/kb/build")
                 if resp.status_code == 200:
@@ -265,7 +271,7 @@ if menu == "Knowledge Base":
                     st.error("❌ Failed to build Knowledge Base")
     
     with col2:
-        if st.button("🗑️ Reset Knowledge Base", type="secondary", key="btn_reset_kb", use_container_width=True):
+        if st.button("🗑️ Reset Knowledge Base", type="secondary", key="btn_reset_kb", width="stretch"):
             if st.session_state.get("confirm_reset"):
                 with st.spinner("Resetting..."):
                     requests.post(f"{BACKEND_URL}/kb/reset")
@@ -291,7 +297,7 @@ elif menu == "Test Cases":
         col1, col2 = st.columns([1, 3])
         
         with col1:
-            auto_gen = st.button("✨ Auto-Generate All", key="btn_auto_gen", type="primary", use_container_width=True)
+            auto_gen = st.button("✨ Auto-Generate All", key="btn_auto_gen", type="primary", width="stretch")
         
         with col2:
             manual_query = st.text_input(
@@ -299,7 +305,7 @@ elif menu == "Test Cases":
                 placeholder="e.g., Test the discount code feature",
                 help="Describe what you want to test"
             )
-            manual_gen = st.button("🔍 Generate from Query", key="btn_manual_gen", use_container_width=True)
+            manual_gen = st.button("🔍 Generate from Query", key="btn_manual_gen", width="stretch")
         
         if auto_gen or (manual_gen and manual_query):
             query = manual_query if manual_gen and manual_query else "Generate comprehensive positive and negative test cases for the entire application described in the documentation."
@@ -314,7 +320,12 @@ elif menu == "Test Cases":
                     if resp.status_code == 200:
                         data = resp.json()
                         
-                        if isinstance(data.get("testcases"), list):
+                        # Check if there's an error message (e.g., empty KB)
+                        if data.get("error"):
+                            st.error(f"❌ {data['error']}")
+                            if data.get("empty_kb"):
+                                st.info("💡 **Tip:** Go to the **Knowledge Base** tab and upload documents, then click **Build Knowledge Base**.")
+                        elif isinstance(data.get("testcases"), list):
                             st.session_state["full_testcases"] = {tc["test_id"]: tc for tc in data["testcases"]}
                             st.success(f"✅ Generated {len(data['testcases'])} test cases successfully!")
                             st.rerun()
@@ -323,7 +334,12 @@ elif menu == "Test Cases":
                             st.write(data)
                     else:
                         st.error(f"❌ Backend Error ({resp.status_code})")
-                        st.text(resp.text)
+                        try:
+                            error_data = resp.json()
+                            if error_data.get("detail"):
+                                st.error(error_data["detail"])
+                        except:
+                            st.text(resp.text)
                 except Exception as e:
                     st.error(f"❌ Request Failed: {e}")
     
@@ -438,7 +454,7 @@ elif menu == "Selenium Scripts":
     st.markdown("---")
     
     # Generate button
-    if st.button("🚀 Generate Selenium Script", type="primary", key="btn_gen_selenium_exec", use_container_width=True):
+    if st.button("🚀 Generate Selenium Script", type="primary", key="btn_gen_selenium_exec", width="stretch"):
         with st.spinner("🤖 Generating Selenium script... This may take a moment."):
             response = requests.post(
                 f"{BACKEND_URL}/agent/selenium-script",
@@ -475,12 +491,12 @@ elif menu == "Selenium Scripts":
                 file_name=f"{selected}.py",
                 mime="text/plain",
                 key="download_script",
-                use_container_width=True,
+                width="stretch",
                 type="primary"
             )
         
         with col2:
-            if st.button("🔄 Regenerate", key="btn_regenerate", use_container_width=True):
+            if st.button("🔄 Regenerate", key="btn_regenerate", width="stretch"):
                 st.session_state["generated_script"] = None
                 st.rerun()
 

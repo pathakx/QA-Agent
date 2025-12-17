@@ -26,8 +26,8 @@ backend/data/html/*
 !backend/data/html/.gitkeep
 
 # Environment Variables
-.env
-.env.local
+# .env
+# .env.local
 
 # IDE & Editors
 .vscode/

@@ -1,9 +1,9 @@
-from backend.core.vectorstore import VectorStore
 from backend.core.models import Chunk
-
-vector_store = VectorStore()
+from backend.services.kb_service import get_vector_store
 
 def retrieve_context(query: str, top_k=8) -> list[Chunk]:
+    # Get the current vector store instance
+    vector_store = get_vector_store()
     results = vector_store.query(query, top_k)
     chunks = []
     # Check if results exist and have documents

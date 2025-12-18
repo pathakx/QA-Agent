@@ -8,23 +8,35 @@ from backend.core.config import settings
 class PineconeVectorStore:
     def __init__(self):
         """Initialize Pinecone vector store with sentence-transformers embeddings."""
-        # Initialize Pinecone
-        self.pc = Pinecone(api_key=settings.PINECONE_API_KEY)
-        
-        # Initialize embedding model (same as ChromaDB default)
-        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-        self.embedding_dimension = 384  # Dimension for all-MiniLM-L6-v2
-        
-        # Index configuration
-        self.index_name = settings.PINECONE_INDEX_NAME
-        self.namespace = "qa-agent"
-        
-        # Create index if it doesn't exist
-        self._ensure_index_exists()
-        
-        # Connect to index
-        self.index = self.pc.Index(self.index_name)
-        print(f"Connected to Pinecone index: {self.index_name}")
+        try:
+            print("Initializing Pinecone vector store...")
+            
+            # Initialize Pinecone
+            print(f"Connecting to Pinecone with API key: {settings.PINECONE_API_KEY[:10]}...")
+            self.pc = Pinecone(api_key=settings.PINECONE_API_KEY)
+            print("✓ Connected to Pinecone")
+            
+            # Initialize embedding model (same as ChromaDB default)
+            print("Loading embedding model 'all-MiniLM-L6-v2'...")
+            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            self.embedding_dimension = 384  # Dimension for all-MiniLM-L6-v2
+            print("✓ Embedding model loaded")
+            
+            # Index configuration
+            self.index_name = settings.PINECONE_INDEX_NAME
+            self.namespace = "qa-agent"
+            
+            # Create index if it doesn't exist
+            self._ensure_index_exists()
+            
+            # Connect to index
+            self.index = self.pc.Index(self.index_name)
+            print(f"✓ Connected to Pinecone index: {self.index_name}")
+        except Exception as e:
+            print(f"❌ ERROR initializing Pinecone vector store: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
     
     def _ensure_index_exists(self):
         """Create Pinecone index if it doesn't exist."""

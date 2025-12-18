@@ -16,6 +16,18 @@ app.add_middleware(
 app.include_router(docs_api.router, prefix="/kb", tags=["knowledge-base"])
 app.include_router(agent_api.router, prefix="/agent", tags=["agent"])
 
+@app.get("/")
+def root():
+    return {
+        "message": "QA Testing Brain API",
+        "status": "running",
+        "endpoints": {
+            "health": "/health",
+            "knowledge_base": "/kb",
+            "agent": "/agent"
+        }
+    }
+
 @app.get("/health")
 def health():
     return {"status": "ok"}

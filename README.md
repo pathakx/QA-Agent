@@ -8,10 +8,39 @@ This project is an autonomous QA agent capable of generating test cases and Sele
 - Python 3.8+
 - Chrome Browser (for Selenium)
 - Virtual Environment (created in setup)
-- .env file :
--   GEMINI_API_KEY = YOUR API KEY &
--   VECTOR_DB_DIR=./chroma_db &
--   BACKEND_URL = http://localhost:8000.
+- API Keys:
+  - Groq API Key (for LLM)
+  - Pinecone API Key (for vector storage)
+
+## Environment Setup
+
+Create a `.env` file in the project root with the following variables:
+
+```env
+# Groq LLM Configuration
+GROQ_API_KEY=your_groq_api_key_here
+
+# Pinecone Vector Store Configuration
+PINECONE_API_KEY=your_pinecone_api_key_here
+PINECONE_INDEX_NAME=qa-agent-index
+PINECONE_CLOUD=aws
+PINECONE_REGION=us-east-1
+
+# Backend URL
+BACKEND_URL=http://localhost:8000
+```
+
+**Getting API Keys:**
+
+1. **Groq API Key:**
+   - Sign up at [console.groq.com](https://console.groq.com/)
+   - Go to API Keys section
+   - Create and copy your API key
+
+2. **Pinecone API Key:**
+   - Sign up at [pinecone.io](https://www.pinecone.io/) (free tier available)
+   - Create a project
+   - Copy your API key from the dashboard
 
 
 ## Starting the Application

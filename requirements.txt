@@ -6,9 +6,8 @@ uvicorn
 python-multipart
 pymupdf
 beautifulsoup4
-chromadb
-sentence-transformers
 pydantic
 python-dotenv
-google-generativeai
 openai
+pinecone-client
+sentence-transformers

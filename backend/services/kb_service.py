@@ -5,7 +5,7 @@ from backend.core.models import DocumentMeta
 from backend.parsers.docs_parser import parse_document
 from backend.parsers.text_chunker import chunk_text
 from backend.parsers.html_parser import parse_html
-from backend.core.vectorstore import VectorStore
+from backend.core.vectorstore import PineconeVectorStore
 
 # Global vector store instance
 _vector_store = None
@@ -13,19 +13,19 @@ _vector_store = None
 DOC_PATH = "backend/data/docs/"
 HTML_PATH = "backend/data/html/ui_elements.json"
 
-def get_vector_store() -> VectorStore:
-    """Get or create the vector store instance."""
+def get_vector_store():
+    """Get or create the Pinecone vector store instance."""
     global _vector_store
     if _vector_store is None:
-        print("Initializing new vector store instance")
-        _vector_store = VectorStore()
+        print("Initializing Pinecone vector store instance")
+        _vector_store = PineconeVectorStore()
     return _vector_store
 
 def reinitialize_vector_store():
-    """Force reinitialize the vector store instance."""
+    """Force reinitialize the Pinecone vector store instance."""
     global _vector_store
-    print("Reinitializing vector store instance")
-    _vector_store = VectorStore()
+    print("Reinitializing Pinecone vector store instance")
+    _vector_store = PineconeVectorStore()
     return _vector_store
 
 def ingest_document(file_path: str) -> DocumentMeta:

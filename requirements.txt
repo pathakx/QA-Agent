@@ -9,5 +9,5 @@ beautifulsoup4
 pydantic
 python-dotenv
 openai
-pinecone-client
+pinecone
 sentence-transformers

@@ -1,13 +1,19 @@
-streamlit
-requests
-pandas
+# Backend API Framework
 fastapi
 uvicorn
+
+# File Upload Support
 python-multipart
+
+# Document Parsing
 pymupdf
 beautifulsoup4
+
+# Data Models & Configuration
 pydantic
 python-dotenv
+
+# LLM & Vector Store
 openai
 pinecone
 sentence-transformers

@@ -1,175 +1,150 @@
-from pinecone import Pinecone, ServerlessSpec
-from sentence_transformers import SentenceTransformer
 import os
 import time
 from backend.core.models import Chunk
 from backend.core.config import settings
+from sentence_transformers import SentenceTransformer
+from pinecone import Pinecone
+from transformers import logging as transformers_logging
 
-class PineconeVectorStore:
-    def __init__(self):
-        """Initialize Pinecone vector store with sentence-transformers embeddings."""
-        try:
-            print("Initializing Pinecone vector store...")
-            
-            # Initialize Pinecone
-            print(f"Connecting to Pinecone with API key: {settings.PINECONE_API_KEY[:10]}...")
-            self.pc = Pinecone(api_key=settings.PINECONE_API_KEY)
-            print("✓ Connected to Pinecone")
-            
-            # Initialize embedding model (same as ChromaDB default)
-            print("Loading embedding model 'all-MiniLM-L6-v2'...")
-            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-            self.embedding_dimension = 384  # Dimension for all-MiniLM-L6-v2
-            print("✓ Embedding model loaded")
-            
-            # Index configuration
-            self.index_name = settings.PINECONE_INDEX_NAME
-            self.namespace = "qa-agent"
-            
-            # Create index if it doesn't exist
-            self._ensure_index_exists()
-            
-            # Connect to index
-            self.index = self.pc.Index(self.index_name)
-            print(f"✓ Connected to Pinecone index: {self.index_name}")
-        except Exception as e:
-            print(f"❌ ERROR initializing Pinecone vector store: {e}")
-            import traceback
-            traceback.print_exc()
-            raise
-    
-    def _ensure_index_exists(self):
-        """Create Pinecone index if it doesn't exist."""
-        existing_indexes = [index.name for index in self.pc.list_indexes()]
+# Suppress warnings from transformers (like "position_ids unexpected")
+transformers_logging.set_verbosity_error()
+
+class VectorStore:
+    def __init__(self, collection_name: str = "qa_collection"):
+        """
+        Initialize Pinecone Vector Store.
+        collection_name is used as a fallback if PINECONE_INDEX_NAME is not set, 
+        or simply ignored if we enforce the env var.
+        """
+        self.api_key = settings.PINECONE_API_KEY
+        self.index_name = settings.PINECONE_INDEX_NAME
+
+        if not self.api_key:
+            print("Error: PINECONE_API_KEY not found in settings.")
+            raise ValueError("PINECONE_API_KEY not set.")
         
-        if self.index_name not in existing_indexes:
-            print(f"Creating new Pinecone index: {self.index_name}")
-            self.pc.create_index(
-                name=self.index_name,
-                dimension=self.embedding_dimension,
-                metric='cosine',
-                spec=ServerlessSpec(
-                    cloud=settings.PINECONE_CLOUD,
-                    region=settings.PINECONE_REGION
-                )
-            )
-            # Wait for index to be ready
-            while not self.pc.describe_index(self.index_name).status['ready']:
-                print("Waiting for index to be ready...")
-                time.sleep(1)
-            print(f"Index {self.index_name} created successfully")
-        else:
-            print(f"Using existing Pinecone index: {self.index_name}")
-    
-    def _generate_embeddings(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for a list of texts."""
-        embeddings = self.embedding_model.encode(texts, show_progress_bar=False)
-        return embeddings.tolist()
-    
+        if not self.index_name:
+             print(f"Warning: PINECONE_INDEX_NAME not set. Using provided collection_name: {collection_name}")
+             self.index_name = collection_name
+
+        # Initialize Pinecone
+        self.pc = Pinecone(api_key=self.api_key)
+        
+        # Connect to the index
+        print(f"Connecting to Pinecone index: {self.index_name}")
+        self.index = self.pc.Index(self.index_name)
+        
+        # Initialize Embedding Model
+        # This matches the dimension of the index (384)
+        print("Loading embedding model: sentence-transformers/all-MiniLM-L6-v2...")
+        self.model = SentenceTransformer('all-MiniLM-L6-v2') 
+        print("Embedding model loaded.")
+
     def add_chunks(self, chunks: list[Chunk]):
-        """Add chunks to Pinecone index."""
         if not chunks:
             print("Warning: add_chunks called with empty chunks list")
             return
-        
-        print(f"Adding {len(chunks)} chunks to Pinecone")
-        
-        # Prepare data for upsert
-        texts = [c.text for c in chunks]
-        embeddings = self._generate_embeddings(texts)
-        
-        # Create vectors for Pinecone (id, embedding, metadata)
-        vectors = []
-        for chunk, embedding in zip(chunks, embeddings):
-            # Add text to metadata for retrieval
-            metadata = chunk.metadata.copy()
-            metadata['text'] = chunk.text
             
+        print(f"Processing {len(chunks)} chunks for Pinecone...")
+        
+        # Generate embeddings
+        texts = [c.text for c in chunks]
+        embeddings = self.model.encode(texts)
+        
+        vectors = []
+        for i, chunk in enumerate(chunks):
+            # Prepare metadata
+            metadata = chunk.metadata.copy()
+            # Ensure text is stored in metadata for retrieval
+            if 'text' not in metadata:
+                metadata['text'] = chunk.text
+            
+            # Pinecone expects 'values' as the embedding vector
             vectors.append({
-                'id': chunk.id,
-                'values': embedding,
-                'metadata': metadata
+                "id": chunk.id,
+                "values": embeddings[i].tolist(),
+                "metadata": metadata
             })
         
-        # Upsert in batches of 100 (Pinecone limit)
+        # Upsert to Pinecone
+        # Determine batch size (Pinecone recommendation is usually <1000, keep it safe at 100)
         batch_size = 100
-        for i in range(0, len(vectors), batch_size):
-            batch = vectors[i:i + batch_size]
-            self.index.upsert(vectors=batch, namespace=self.namespace)
-            print(f"Upserted batch {i//batch_size + 1}/{(len(vectors)-1)//batch_size + 1}")
+        total_vectors = len(vectors)
         
-        print(f"Successfully added {len(chunks)} chunks to Pinecone")
-    
-    def query(self, query: str, top_k: int = 5):
-        """Query Pinecone index for similar chunks."""
-        try:
-            # Check if index is empty
-            stats = self.index.describe_index_stats()
-            total_vectors = stats.get('namespaces', {}).get(self.namespace, {}).get('vector_count', 0)
+        print(f"Upserting {total_vectors} vectors to Pinecone...")
+        for i in range(0, total_vectors, batch_size):
+            batch = vectors[i:i+batch_size]
+            self.index.upsert(vectors=batch)
+            print(f"Upserted batch {i} to {min(i+batch_size, total_vectors)}")
             
-            if total_vectors == 0:
+        print(f"Successfully added chunks. Total count now: {self.count()}")
+
+    def delete_document(self, filename: str):
+        """Delete all vectors associated with a specific filename."""
+        try:
+            print(f"Deleting vectors for document: {filename}")
+            # Pinecone delete by metadata filter
+            self.index.delete(filter={"filename": filename})
+            print(f"Successfully deleted vectors for {filename}")
+        except Exception as e:
+            print(f"Error deleting document {filename}: {e}")
+
+    def query(self, query: str, top_k: int = 5):
+        try:
+            # Check if index has vectors? Pinecone check is expensive, maybe just query.
+            if self.count() == 0:
                 print("Warning: Index is empty, returning no results")
                 return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
-            
+
             # Generate query embedding
-            query_embedding = self._generate_embeddings([query])[0]
+            query_vector = self.model.encode(query).tolist()
             
             # Query Pinecone
             results = self.index.query(
-                vector=query_embedding,
+                vector=query_vector,
                 top_k=top_k,
-                namespace=self.namespace,
                 include_metadata=True
             )
             
-            # Format results to match ChromaDB structure
-            ids = [[match['id'] for match in results['matches']]]
-            documents = [[match['metadata'].get('text', '') for match in results['matches']]]
-            metadatas = [[{k: v for k, v in match['metadata'].items() if k != 'text'} 
-                          for match in results['matches']]]
-            distances = [[1 - match['score'] for match in results['matches']]]  # Convert similarity to distance
+            # Formatting results to match old Chroma interface:
+            # {'ids': [[id1, id2]], 'documents': [[text1, text2]], ...}
+            ids = []
+            documents = []
+            metadatas = []
+            distances = []
             
+            for match in results.matches:
+                ids.append(match.id)
+                documents.append(match.metadata.get('text', ''))
+                metadatas.append(match.metadata)
+                distances.append(match.score)
+                
             return {
-                "ids": ids,
-                "documents": documents,
-                "metadatas": metadatas,
-                "distances": distances
+                "ids": [ids],
+                "documents": [documents],
+                "metadatas": [metadatas],
+                "distances": [distances]
             }
         except Exception as e:
-            print(f"Error querying Pinecone: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Error querying index: {e}")
+            # Return empty structure on error
             return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
-    
+
     def reset(self):
-        """Reset the vector store by deleting all vectors in the namespace."""
-        print(f"Resetting Pinecone namespace: {self.namespace}")
-        
+        """Delete all vectors in the index."""
         try:
-            # Delete all vectors in the namespace
-            self.index.delete(delete_all=True, namespace=self.namespace)
-            print(f"Successfully reset namespace {self.namespace}")
-            
-            # Wait a moment for deletion to propagate
-            time.sleep(1)
-            
-            # Verify reset
-            stats = self.index.describe_index_stats()
-            count = stats.get('namespaces', {}).get(self.namespace, {}).get('vector_count', 0)
-            print(f"Vector count after reset: {count}")
-            
+            print(f"Resetting index '{self.index_name}'...")
+            self.index.delete(delete_all=True)
+            print("Index reset successful.")
         except Exception as e:
             print(f"Error during reset: {e}")
-            import traceback
-            traceback.print_exc()
             raise
     
     def count(self):
-        """Return the number of vectors in the namespace."""
+        """Return the number of vectors in the index."""
         try:
             stats = self.index.describe_index_stats()
-            count = stats.get('namespaces', {}).get(self.namespace, {}).get('vector_count', 0)
-            return count
+            return stats.total_vector_count
         except Exception as e:
             print(f"Error getting count: {e}")
             return 0

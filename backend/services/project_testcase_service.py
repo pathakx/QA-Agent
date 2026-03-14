@@ -1,18 +1,23 @@
+"""
+Project-aware test case generation service
+"""
 import json
-from backend.services.rag_service import retrieve_context, build_testcase_prompt
+from backend.services.project_rag_service import retrieve_project_context, build_testcase_prompt
 from backend.core.llm_client import LLMClient
+from backend.core.vectorstore import VectorStore
 
 llm = LLMClient()
 
-def generate_testcases(query: str):
+def generate_testcases_for_project(query: str, vector_store: VectorStore, project_name: str = "", existing_testcases: list = None):
+    """Generate test cases using project-specific knowledge base"""
     try:
         # Logging setup
         with open("backend.log", "a", encoding="utf-8") as log_file:
-            log_file.write(f"\n--- New Request: {query} ---\n")
+            log_file.write(f"\n--- New Request for Project '{project_name}': {query} ---\n")
             
-        print(f"Generating test cases for query: {query}")
-        chunks = retrieve_context(query)
-        print(f"Retrieved {len(chunks)} context chunks")
+        print(f"[Project: {project_name}] Generating test cases for query: {query}")
+        chunks = retrieve_project_context(query, vector_store)
+        print(f"[Project: {project_name}] Retrieved {len(chunks)} context chunks")
         
         with open("backend.log", "a", encoding="utf-8") as log_file:
             log_file.write(f"Retrieved {len(chunks)} chunks.\n")
@@ -25,13 +30,13 @@ def generate_testcases(query: str):
                 "empty_kb": True
             }
         
-        prompt = build_testcase_prompt(query, chunks)
-        print("Sending prompt to LLM...")
+        prompt = build_testcase_prompt(query, chunks, existing_testcases)
+        print(f"[Project: {project_name}] Sending prompt to LLM...")
         response = llm.generate(prompt)
-        print(f"Received response from LLM (length: {len(response)})")
+        print(f"[Project: {project_name}] Received response from LLM (length: {len(response)})")
         
         with open("backend.log", "a", encoding="utf-8") as log_file:
-            log_file.write(f"LLM Response:\n{response}\n----------\n")
+            log_file.write(f"LLM Response:\\n{response}\\n----------\\n")
         
         # Check if LLM couldn't find information
         if "not defined" in response.lower() or "not specified" in response.lower():
@@ -64,7 +69,7 @@ def generate_testcases(query: str):
                 print("Successfully parsed JSON after cleaning code blocks")
             except json.JSONDecodeError:
                 # If that fails, try to find JSON array or object with regex
-                json_match = re.search(r'(\{.*\}|\[.*\])', clean_response, re.DOTALL)
+                json_match = re.search(r'(\\{.*\\}|\\[.*\\])', clean_response, re.DOTALL)
                 if json_match:
                     try:
                         extracted = json_match.group(0)
@@ -75,7 +80,6 @@ def generate_testcases(query: str):
                         raise
                 else:
                     raise ValueError("Could not find valid JSON in response")
-
 
         # Ensure parsed is in the correct format
         # LLM should return an array of test cases
@@ -108,16 +112,16 @@ def generate_testcases(query: str):
             "raw_context": [c.text[:100] for c in chunks]  # Truncate for size
         }
     except Exception as e:
-        print(f"ERROR in generate_testcases: {str(e)}")
+        print(f"ERROR in generate_testcases_for_project: {str(e)}")
         import traceback
         traceback.print_exc()
         
         # Log to file as well
         try:
             with open("backend_error.log", "a") as f:
-                f.write(f"ERROR: {str(e)}\n")
+                f.write(f"ERROR: {str(e)}\\n")
                 f.write(traceback.format_exc())
-                f.write("\n" + "="*50 + "\n")
+                f.write("\\n" + "="*50 + "\\n")
         except:
             pass
         

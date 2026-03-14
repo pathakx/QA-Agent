@@ -1,64 +1,73 @@
+# Logs and temp files
+*.log
+backend.log
+backend_error.log
+
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-*.egg
-*.egg-info/
-dist/
 build/
-*.whl
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Virtual Environment
+# Virtual environments
 venv/
-env/
 ENV/
-.venv/
+env/
 
-# ChromaDB - Vector Database (runtime generated)
-chroma_db/
-
-# Backend Runtime Data
-backend/data/docs/*
-backend/data/html/*
-!backend/data/docs/.gitkeep
-!backend/data/html/.gitkeep
-
-# Environment Variables - IMPORTANT: Never commit API keys!
-.env
-.env.local
-.env.*.local
-
-# IDE & Editors
+# IDEs
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-.DS_Store
-
-# Jupyter Notebook
-.ipynb_checkpoints/
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-*.cover
-
-# Logs
-*.log
-logs/
-backend_error.log
 
 # OS
+.DS_Store
 Thumbs.db
 
-# Streamlit
-.streamlit/
+# Database
+*.db-journal
 
-# Temporary files
-*.tmp
-*.bak
-*.cache
+# Node
+node_modules/
+npm-debug.log
+
+# Test files
+test_*.py
+verify_*.py
+
+# Build outputs
+frontend/dist/
+backend/static/
+
+# Environment
+.env.local
+.env.*.local
+.env
+
+# Application databases and data
+chroma_db/
+jobs.sqlite
+backend/data/
+
+# Additional virtual environments
+.venv/
+
+# Test output
+test_results/

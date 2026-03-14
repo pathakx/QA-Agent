@@ -1,19 +1,23 @@
-# Backend API Framework
+streamlit
+requests
+pandas
 fastapi
 uvicorn
-
-# File Upload Support
 python-multipart
-
-# Document Parsing
 pymupdf
 beautifulsoup4
-
-# Data Models & Configuration
+pinecone-client
+sentence-transformers
 pydantic
 python-dotenv
-
-# LLM & Vector Store
+google-generativeai
 openai
-pinecone
-sentence-transformers
+sqlalchemy
+supabase
+selenium
+webdriver-manager
+pillow
+python-socketio
+aiofiles
+opencv-python
+apscheduler

@@ -46,6 +46,23 @@ async def run_test_background(execution_id: str, test_id: str, script_content: s
         
         await emitter.emit_progress(execution_id, 4, 5, "Collecting results...")
         
+        # Upload artifacts to Supabase Storage
+        from backend.services.storage_service import upload_screenshot, is_supabase_url
+        
+        if result.screenshot_path and not is_supabase_url(result.screenshot_path):
+            print(f"[EXEC] Uploading screenshot to storage: {result.screenshot_path}")
+            storage_url = upload_screenshot(result.screenshot_path, test_id, project_id)
+            if storage_url:
+                result.screenshot_path = storage_url
+
+        if getattr(result, 'video_path', None) and not is_supabase_url(result.video_path):
+            print(f"[EXEC] Uploading video to storage: {result.video_path}")
+            # Same upload function works for video, since bucket is just a file store
+            # but we can reuse upload_screenshot for now or rename it
+            video_url = upload_screenshot(result.video_path, test_id, project_id)
+            if video_url:
+                result.video_path = video_url
+        
         # Update DB
         client = create_user_client(token)
         client.table('test_executions').update({
@@ -211,6 +228,10 @@ async def get_execution_screenshot(
     
     screenshot_path = res.data[0]['screenshot_path']
     
+    if screenshot_path.startswith("http"):
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=screenshot_path)
+    
     if not os.path.exists(screenshot_path):
         raise HTTPException(status_code=404, detail="Screenshot file not found on disk")
     
@@ -233,6 +254,11 @@ async def get_execution_video(
         raise HTTPException(status_code=404, detail="Video not found")
     
     video_path = res.data[0]['video_path']
+    
+    if video_path.startswith("http"):
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=video_path)
+        
     if not os.path.exists(video_path):
         raise HTTPException(status_code=404, detail="Video file not found on disk")
     

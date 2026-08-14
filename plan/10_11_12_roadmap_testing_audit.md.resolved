@@ -1,0 +1,423 @@
+# Selenium → Playwright Migration Blueprint — Parts 10, 11 & 12
+# MIGRATION ROADMAP + TESTING + PRODUCTION AUDIT
+
+---
+
+## 10. PHASE-WISE MIGRATION ROADMAP
+
+### Phase 1 — Abstraction Layer Foundation
+**Duration**: 3-4 days | **Risk**: Low | **Complexity**: Medium
+
+**Objectives**: Create the automation abstraction layer without modifying any existing code.
+
+**Files to create**:
+| File | Purpose |
+|------|---------|
+| `backend/automation/__init__.py` | Package init |
+| `backend/automation/base_driver.py` | BaseDriver + BaseExecutionContext ABCs |
+| `backend/automation/driver_factory.py` | DriverFactory with engine registry |
+| `backend/automation/execution_context.py` | ExecutionContext implementations |
+| `backend/automation/browser_pool.py` | BrowserPoolManager |
+| `backend/automation/artifact_manager.py` | ArtifactManager |
+| `backend/automation/config.py` | BrowserConfig, engine settings |
+
+**Files modified**: None (additive only)
+
+**APIs affected**: None
+
+**Risks**: Import errors if Playwright not installed yet → mitigated by lazy imports
+
+**Rollback**: Delete `backend/automation/` directory
+
+**Validation**: Unit tests for DriverFactory, BrowserConfig, ArtifactManager
+
+---
+
+### Phase 2 — Playwright Prototype
+**Duration**: 2-3 days | **Risk**: Low | **Complexity**: Medium
+
+**Objectives**: Implement PlaywrightDriver and verify it works standalone.
+
+**Files to create**:
+| File | Purpose |
+|------|---------|
+| `backend/automation/playwright_driver.py` | PlaywrightDriver + PlaywrightExecutionContext |
+| `tests/test_playwright_driver.py` | Integration tests |
+
+**Files modified**:
+| File | Change |
+|------|--------|
+| `requirements.txt` | Add `playwright` |
+| `backend/core/config.py` | Add `BROWSER_ENGINE` setting |
+
+**Dependencies**: `pip install playwright && playwright install chromium`
+
+**Risks**: Playwright binary download failures in certain environments
+
+**Rollback**: Remove playwright from requirements, delete new files
+
+**Validation**:
+```python
+# Standalone test
+async def test_playwright_driver():
+    driver = PlaywrightDriver()
+    await driver.launch(BrowserConfig(headless=True))
+    ctx = await driver.create_context()
+    await ctx.navigate("https://example.com")
+    title = await ctx.evaluate("document.title")
+    assert "Example" in title
+    await ctx.close()
+    await driver.shutdown()
+```
+
+---
+
+### Phase 3 — Dual-Engine Support
+**Duration**: 3-4 days | **Risk**: Medium | **Complexity**: High
+
+**Objectives**: Wire DriverFactory into existing execution pipeline. Both engines work simultaneously.
+
+**Files modified**:
+| File | Change |
+|------|--------|
+| `backend/services/execution_service.py` | Add `engine` parameter to `execute_test_script()` |
+| `backend/core/config.py` | Add `BROWSER_ENGINE` env var, default to `"selenium"` |
+| `backend/api/execution_api.py` | Add optional `engine` query param |
+| `backend/automation/selenium_driver.py` | Create SeleniumDriver wrapper |
+
+**APIs affected**:
+- `POST /api/agent/execute/{test_id}?engine=playwright` (optional param, backwards-compatible)
+
+**Risks**:
+- Selenium scripts run on Playwright engine → will fail (expected)
+- Thread pool conflicts between Selenium (sync) and Playwright (async)
+
+**Rollback**: Set `BROWSER_ENGINE=selenium` env var → system behaves exactly as before
+
+**Validation**:
+- Existing Selenium tests pass with `engine=selenium`
+- Simple navigation test passes with `engine=playwright`
+- API returns engine info in execution result
+
+---
+
+### Phase 4 — Script Generation Migration
+**Duration**: 4-5 days | **Risk**: High | **Complexity**: High
+
+**Objectives**: Create Playwright prompt template alongside Selenium one.
+
+**Files to create**:
+| File | Purpose |
+|------|---------|
+| `backend/services/script_generator.py` | Engine-aware script generation (replaces selenium_service.py) |
+
+**Files modified**:
+| File | Change |
+|------|--------|
+| `backend/agent/workflow.py` | Import from `script_generator` instead of `selenium_service` |
+| `backend/api/agent_api.py` | Route `/automation-script` alongside `/selenium-script` |
+| `backend/services/selenium_service.py` | Add deprecation warning; keep functional |
+
+**Key design**:
+```python
+# script_generator.py
+def generate_script(testcase, html_path, collection_name, engine="playwright"):
+    if engine == "playwright":
+        prompt = build_playwright_prompt(testcase, html_path, collection_name)
+    else:
+        prompt = build_prompt(testcase, html_path, collection_name)  # legacy
+    return llm.generate(prompt)
+```
+
+**Risks**:
+- LLM generates invalid Playwright code → add syntax validation
+- Prompt template quality affects all downstream tests
+
+**Rollback**: Set `BROWSER_ENGINE=selenium` → `generate_script()` uses Selenium template
+
+**Testing**: Generate 10+ scripts with each engine, compare syntax validity and execution success rate
+
+---
+
+### Phase 5 — Execution Engine Migration
+**Duration**: 3-4 days | **Risk**: Medium | **Complexity**: Medium
+
+**Objectives**: Default to Playwright for script execution.
+
+**Files modified**:
+| File | Change |
+|------|--------|
+| `backend/services/execution_service.py` | Playwright subprocess runner (async scripts) |
+| `backend/services/batch_execution_service.py` | Use engine-aware execution |
+| `backend/services/scheduler_service.py` | Use engine-aware execution |
+
+**Key change**: Execution service must handle `asyncio.run(main())` pattern in generated Playwright scripts (still via subprocess, since AI-generated scripts are untrusted).
+
+**Risks**: Async subprocess execution on Windows has known limitations
+
+**Rollback**: `BROWSER_ENGINE=selenium` env var
+
+**Validation**: Run full autonomous mode with Playwright engine end-to-end
+
+---
+
+### Phase 6 — Self-Healing Migration
+**Duration**: 2-3 days | **Risk**: Medium | **Complexity**: Medium
+
+**Objectives**: Update `fix_failures()` to use Playwright prompt template and enhanced context.
+
+**Files modified**:
+| File | Change |
+|------|--------|
+| `backend/agent/workflow.py` | Update `fix_failures()` to use engine-aware repair prompt |
+| `backend/services/script_generator.py` | Add `build_repair_prompt(engine, error, dom_snapshot)` |
+
+**Enhancement**: Include DOM snapshot and accessibility tree in repair prompt.
+
+**Risks**: Repair prompts too large for LLM context window
+
+**Rollback**: Revert `fix_failures()` to Selenium-only
+
+**Validation**: Intentionally break 5 test selectors, verify self-healing success rate
+
+---
+
+### Phase 7 — Async Optimization
+**Duration**: 3-4 days | **Risk**: Low | **Complexity**: Medium
+
+**Objectives**: Eliminate remaining sync bottlenecks.
+
+**Files modified**:
+| File | Change |
+|------|--------|
+| `backend/core/llm_client.py` | Add `async_generate()` using `httpx` |
+| `backend/core/vectorstore.py` | Wrap Pinecone calls in executor |
+| `backend/services/batch_execution_service.py` | Add concurrent execution with semaphore |
+| `backend/services/video_recorder.py` | Mark deprecated (replaced by Playwright) |
+| `backend/services/screenshot_service.py` | Mark deprecated (replaced by ArtifactManager) |
+
+**Validation**: Load test with 10 concurrent test executions; measure throughput improvement
+
+---
+
+### Phase 8 — Database & API Migration
+**Duration**: 2-3 days | **Risk**: Medium | **Complexity**: Low
+
+**Objectives**: Rename Selenium-specific DB tables and API routes.
+
+**Database changes**:
+```sql
+-- Migration script
+ALTER TABLE public.selenium_scripts RENAME TO public.automation_scripts;
+-- Update RLS policies to reference new table name
+-- Update all indexes
+```
+
+**API changes**:
+| Old Route | New Route | Backward Compat |
+|-----------|-----------|-----------------|
+| `POST /api/agent/selenium-script` | `POST /api/agent/automation-script` | Keep old as alias |
+| `GET /api/agent/selenium-scripts` | `GET /api/agent/automation-scripts` | Keep old as alias |
+| `GET /api/agent/selenium-scripts/{id}` | `GET /api/agent/automation-scripts/{id}` | Keep old as alias |
+
+**Files modified**: `agent_api.py`, `workflow.py`, `batch_execution_service.py`, `scheduler_service.py`
+
+**Risks**: Frontend must update API calls simultaneously
+
+**Rollback**: Rename table back to `selenium_scripts`
+
+---
+
+### Phase 9 — Deployment Migration
+**Duration**: 2-3 days | **Risk**: Medium | **Complexity**: Medium
+
+**Objectives**: Create Playwright Docker image and CI/CD pipeline.
+
+**Files to create**: `Dockerfile.playwright`, updated `docker-compose.yml`, `.github/workflows/ci.yml`
+
+**Files modified**: `.devcontainer/devcontainer.json` → update base image
+
+**Validation**: Deploy to staging, run full test suite, verify all artifacts
+
+---
+
+### Phase 10 — Selenium Deprecation
+**Duration**: 1-2 days | **Risk**: Low | **Complexity**: Low
+
+**Objectives**: Remove Selenium dependencies and legacy code.
+
+**Files to delete/deprecate**:
+| File | Action |
+|------|--------|
+| `backend/services/selenium_service.py` | Delete (replaced by `script_generator.py`) |
+| `backend/services/screenshot_service.py` | Delete (replaced by `ArtifactManager`) |
+| `backend/services/video_recorder.py` | Delete (replaced by Playwright built-in) |
+| `backend/automation/selenium_driver.py` | Keep but mark as optional |
+
+**Dependencies to remove**: `selenium`, `webdriver-manager`, `opencv-python` (if no other use)
+
+**Validation**: Full regression test with `BROWSER_ENGINE=playwright` (only valid option)
+
+---
+
+## 10.1 Phase Summary Timeline
+
+```mermaid
+gantt
+    title Migration Roadmap
+    dateFormat  YYYY-MM-DD
+    
+    section Foundation
+    Phase 1 - Abstraction Layer    :p1, 2026-05-19, 4d
+    Phase 2 - Playwright Prototype :p2, after p1, 3d
+    
+    section Integration
+    Phase 3 - Dual Engine Support  :p3, after p2, 4d
+    Phase 4 - Script Generation    :p4, after p3, 5d
+    
+    section Migration
+    Phase 5 - Execution Engine     :p5, after p4, 4d
+    Phase 6 - Self-Healing         :p6, after p5, 3d
+    Phase 7 - Async Optimization   :p7, after p6, 4d
+    
+    section Cleanup
+    Phase 8 - DB & API Migration   :p8, after p7, 3d
+    Phase 9 - Deployment           :p9, after p8, 3d
+    Phase 10 - Deprecation         :p10, after p9, 2d
+```
+
+**Total estimated duration**: 5-7 weeks
+
+---
+
+## 11. TESTING & VALIDATION STRATEGY
+
+### 11.1 Test Matrix
+
+| Test Type | What It Validates | When to Run | Engine |
+|-----------|------------------|-------------|--------|
+| **Unit Tests** | Abstraction layer classes, DriverFactory, ArtifactManager | Every commit | N/A |
+| **Integration Tests** | Browser launch, navigation, screenshots, video | Every PR | Both engines |
+| **Script Generation Tests** | LLM generates valid Python, syntax correctness | Phase 4+ | Both engines |
+| **Execution Tests** | Full test lifecycle: generate → execute → result | Phase 5+ | Both engines |
+| **Self-Healing Tests** | Intentionally broken selectors heal correctly | Phase 6+ | Playwright |
+| **Concurrency Tests** | 5-10 concurrent browser sessions | Phase 7+ | Playwright |
+| **WebSocket Tests** | Real-time events stream correctly | All phases | N/A |
+| **Regression Tests** | Existing test results match after migration | All phases | Both engines |
+| **Performance Tests** | Execution speed, memory usage, throughput | Phase 7+ | Both engines |
+| **Docker Tests** | Build, start, execute in container | Phase 9+ | Playwright |
+
+### 11.2 Migration Validation Checklist
+
+#### Pre-Migration
+- [ ] All existing Selenium tests have baseline results recorded
+- [ ] Execution success rate baseline documented
+- [ ] Average execution duration baseline documented
+- [ ] Memory usage baseline under load documented
+
+#### Phase 3 Gate (Dual Engine)
+- [ ] DriverFactory creates both Selenium and Playwright drivers
+- [ ] Both drivers can navigate to a URL and take a screenshot
+- [ ] API accepts `engine` parameter without breaking existing calls
+- [ ] `BROWSER_ENGINE=selenium` produces identical behavior to pre-migration
+
+#### Phase 5 Gate (Execution Engine)
+- [ ] Playwright-generated scripts execute successfully via subprocess
+- [ ] Screenshots captured on failure
+- [ ] Video recorded via Playwright context
+- [ ] Metadata (BROWSER, BROWSER_VERSION, OS_INFO) parsed from stdout
+- [ ] WebSocket events fire correctly during execution
+- [ ] Batch execution works with Playwright engine
+- [ ] Scheduled execution works with Playwright engine
+
+#### Phase 6 Gate (Self-Healing)
+- [ ] `fix_failures()` generates valid Playwright repair scripts
+- [ ] Self-healing success rate ≥ Selenium baseline
+- [ ] DOM snapshot included in repair prompt
+- [ ] Trace files generated for failed tests
+
+#### Phase 10 Gate (Full Migration)
+- [ ] All tests pass with `BROWSER_ENGINE=playwright`
+- [ ] No references to `selenium` in active code paths
+- [ ] Docker image builds and runs successfully
+- [ ] Memory usage ≤ Selenium baseline
+- [ ] Execution speed ≥ Selenium baseline (should be faster)
+- [ ] All 11 API routes function correctly
+
+### 11.3 Rollout Verification Checklist
+
+- [ ] Health check endpoint responds with engine info
+- [ ] WebSocket connections establish successfully
+- [ ] Autonomous mode completes full cycle (analyze → report)
+- [ ] Single test execution produces screenshot on failure
+- [ ] Batch execution processes all tests in suite
+- [ ] Scheduled test fires on time
+- [ ] Self-healing triggers on failure and retries
+- [ ] Test results saved to Supabase correctly
+- [ ] Frontend displays execution status in real-time
+- [ ] Artifacts (screenshots, video, traces) accessible via API
+
+---
+
+## 12. PRODUCTION READINESS AUDIT
+
+### 12.1 Scoring Matrix (Post-Migration)
+
+| Dimension | Current (Selenium) | Target (Playwright) | Score |
+|-----------|-------------------|---------------------|-------|
+| **Scalability** | 4/10 — single-threaded, no pooling | 8/10 — async, browser pool, concurrent | 🟢 |
+| **Maintainability** | 5/10 — Selenium-specific code scattered | 8/10 — clean abstraction layer | 🟢 |
+| **Reliability** | 5/10 — flaky waits, ChromeDriver drift | 8/10 — auto-wait, bundled browsers | 🟢 |
+| **Cloud Readiness** | 4/10 — manual Chrome setup in Docker | 9/10 — official images, K8s ready | 🟢 |
+| **AI Robustness** | 5/10 — verbose prompts, unreliable scripts | 8/10 — simpler prompts, better selectors | 🟢 |
+| **Deployment Complexity** | 3/10 — ChromeDriver management nightmare | 8/10 — `playwright install` and done | 🟢 |
+| **Observability** | 4/10 — stdout parsing, manual screenshots | 8/10 — traces, HAR, built-in video | 🟢 |
+| **Security** | 6/10 — subprocess sandboxing | 6/10 — same model (subprocess) | 🟡 |
+| **Cost Efficiency** | 5/10 — one browser per test | 8/10 — browser pooling, context reuse | 🟢 |
+| **Developer Experience** | 5/10 — complex setup, verbose API | 9/10 — clean async API, great docs | 🟢 |
+
+**Overall**: 4.6/10 → **8.0/10** — a significant production-readiness improvement.
+
+### 12.2 Remaining Risks Post-Migration
+
+| Risk | Severity | Mitigation |
+|------|----------|------------|
+| **Untrusted AI-generated code execution** | High | Subprocess sandboxing (unchanged from current) |
+| **LLM rate limiting under load** | Medium | Groq rate limiter already implemented; add queueing |
+| **Single-node architecture** | Medium | Browser pool handles 10-20 concurrent tests; add Redis queue for more |
+| **No execution queue/prioritization** | Medium | Implement arq/Celery when needed |
+| **Playwright version upgrades** | Low | Pin version in requirements.txt + Docker image |
+| **Supabase sync client** | Low | Migrate to async client separately |
+
+### 12.3 Technical Debt Remaining
+
+1. **Sync Supabase client** — should migrate to async SDK (separate effort)
+2. **Sync LLM client** — should use `httpx` async HTTP client
+3. **No execution queue** — need Redis + arq for production-scale
+4. **No artifact storage** — should move to S3/MinIO for cloud deployment
+5. **Hardcoded test timeout (60s)** — should be configurable per test
+6. **No browser health monitoring** — add Prometheus metrics
+7. **Single LLM provider** — add OpenAI/Anthropic fallback
+
+### 12.4 Enterprise-Readiness Gaps
+
+| Gap | Priority | Effort |
+|-----|----------|--------|
+| Multi-region deployment | Low | High — requires artifact replication |
+| SSO/SAML authentication | Medium | Medium — Supabase supports this |
+| Audit logging | Medium | Low — add middleware |
+| Role-based access (admin/viewer/editor) | Medium | Medium — extend RLS policies |
+| Test result retention policies | Low | Low — scheduled cleanup |
+| API rate limiting | Medium | Low — FastAPI middleware |
+| Execution cost tracking | Low | Medium — add metering |
+| Custom browser profiles | Low | Low — Playwright supports this natively |
+
+### 12.5 Architecture Decision Records
+
+| Decision | Rationale | Alternative Considered |
+|----------|-----------|----------------------|
+| Keep subprocess execution model | AI-generated scripts are untrusted; process isolation is required | In-process `exec()` — rejected for security |
+| Browser pool with semaphore | Simple, sufficient for 10-20 concurrent tests | Selenium Grid — rejected as over-complex |
+| Maintain Selenium as fallback | Zero-risk rollback during migration | Hard cutover — rejected as too risky |
+| Engine via env var, not per-request | Simpler operations; avoid engine mismatch in cached scripts | Per-request engine — deferred to post-migration |
+| Rename DB table to `automation_scripts` | Future-proofs naming; any engine can store scripts | Keep `selenium_scripts` — rejected as confusing |

@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QA Agent - Playwright Test Fixture</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f4f5f7; }
+        .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        h1 { color: #1a1a2e; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; color: #333; }
+        input, select { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        button { padding: 12px 24px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-right: 8px; }
+        .btn-primary { background: #4361ee; color: white; }
+        .btn-secondary { background: #6c757d; color: white; }
+        .btn-danger { background: #e63946; color: white; }
+        #result { margin-top: 20px; padding: 15px; border-radius: 4px; display: none; }
+        .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        #counter { font-size: 24px; font-weight: bold; color: #4361ee; margin: 10px 0; }
+        .hidden { display: none !important; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { padding: 8px 12px; border: 1px solid #ddd; text-align: left; }
+        th { background: #f8f9fa; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 id="page-title">Test Fixture Page</h1>
+        <p id="page-description">This page is used for Playwright integration testing.</p>
+
+        <!-- Login Form -->
+        <form id="login-form">
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" name="username" placeholder="Enter username" data-testid="username-input">
+            </div>
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" placeholder="Enter password" data-testid="password-input">
+            </div>
+            <div class="form-group">
+                <label for="role">Role</label>
+                <select id="role" name="role" data-testid="role-select">
+                    <option value="">Select a role</option>
+                    <option value="admin">Admin</option>
+                    <option value="tester">Tester</option>
+                    <option value="viewer">Viewer</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="remember" name="remember" data-testid="remember-checkbox">
+                    Remember me
+                </label>
+            </div>
+            <button type="submit" class="btn-primary" id="login-btn" data-testid="login-button">Login</button>
+            <button type="button" class="btn-secondary" id="reset-btn" data-testid="reset-button" onclick="resetForm()">Reset</button>
+            <button type="button" class="btn-danger" id="alert-btn" data-testid="alert-button" onclick="showAlert()">Show Alert</button>
+        </form>
+
+        <div id="result"></div>
+
+        <!-- Counter Section -->
+        <h2>Counter</h2>
+        <div id="counter" data-testid="counter-display">0</div>
+        <button class="btn-primary" id="increment-btn" data-testid="increment-button" onclick="increment()">Increment</button>
+        <button class="btn-secondary" id="decrement-btn" data-testid="decrement-button" onclick="decrement()">Decrement</button>
+
+        <!-- Dynamic Content -->
+        <h2>Dynamic Content</h2>
+        <div id="dynamic-content" data-testid="dynamic-content">
+            <p>Content loads here after delay.</p>
+        </div>
+        <button class="btn-primary" id="load-btn" data-testid="load-button" onclick="loadContent()">Load Content</button>
+
+        <!-- Data Table -->
+        <div id="data-table" class="hidden" data-testid="data-table">
+            <h2>Test Results</h2>
+            <table>
+                <thead>
+                    <tr><th>Test ID</th><th>Status</th><th>Duration</th></tr>
+                </thead>
+                <tbody id="table-body">
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        let counter = 0;
+
+        // Login form handler
+        document.getElementById('login-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const resultDiv = document.getElementById('result');
+
+            if (username === 'admin' && password === 'password123') {
+                resultDiv.className = 'success';
+                resultDiv.textContent = 'Login successful! Welcome, ' + username;
+                resultDiv.style.display = 'block';
+            } else if (!username || !password) {
+                resultDiv.className = 'error';
+                resultDiv.textContent = 'Please fill in all fields';
+                resultDiv.style.display = 'block';
+            } else {
+                resultDiv.className = 'error';
+                resultDiv.textContent = 'Invalid credentials. Please try again.';
+                resultDiv.style.display = 'block';
+            }
+        });
+
+        function resetForm() {
+            document.getElementById('login-form').reset();
+            document.getElementById('result').style.display = 'none';
+        }
+
+        function showAlert() {
+            alert('This is a test alert!');
+        }
+
+        function increment() {
+            counter++;
+            document.getElementById('counter').textContent = counter;
+        }
+
+        function decrement() {
+            counter--;
+            document.getElementById('counter').textContent = counter;
+        }
+
+        function loadContent() {
+            const content = document.getElementById('dynamic-content');
+            content.innerHTML = '<p>Loading...</p>';
+            setTimeout(function() {
+                content.innerHTML = '<p data-testid="loaded-text">Content loaded successfully!</p>';
+                // Show the data table
+                const table = document.getElementById('data-table');
+                table.classList.remove('hidden');
+                const tbody = document.getElementById('table-body');
+                tbody.innerHTML = '';
+                const data = [
+                    { id: 'TC-001', status: 'Passed', duration: '2.3s' },
+                    { id: 'TC-002', status: 'Failed', duration: '5.1s' },
+                    { id: 'TC-003', status: 'Passed', duration: '1.8s' },
+                ];
+                data.forEach(function(row) {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = '<td>' + row.id + '</td><td>' + row.status + '</td><td>' + row.duration + '</td>';
+                    tbody.appendChild(tr);
+                });
+            }, 500);
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,385 @@
+# Selenium → Playwright Migration Blueprint — Parts 6 & 7
+# SCRIPT GENERATION MIGRATION + SELF-HEALING MIGRATION
+
+---
+
+## 6.1 Current Script Generation Analysis
+
+The current `selenium_service.build_prompt()` generates a **245-line prompt** that is entirely Selenium-specific. Key issues:
+
+1. **Hardcoded imports** — 6+ Selenium imports in template
+2. **Hardcoded driver setup** — `webdriver.Chrome(service=Service(ChromeDriverManager().install()))`
+3. **Helper functions embedded** — `handle_alert()`, `save_screenshot_on_failure()`, `print_metadata()`
+4. **Explicit waits** — `time.sleep()` encouraged in template
+5. **Alert handling** — `driver.switch_to.alert` pattern
+6. **Metadata via stdout** — `SCREENSHOT_PATH:`, `BROWSER:`, `VIDEO_PATH:` printed conventions
+
+## 6.2 New Playwright Prompt Template
+
+```python
+# backend/services/script_generator.py
+
+def build_playwright_prompt(testcase: dict, html_path=None, collection_name=None):
+    """Build LLM prompt for Playwright async script generation."""
+    ui_elements = load_ui_elements(html_path)
+    html = load_html(html_path)
+
+    html_abs_path = os.path.abspath(html_path) if html_path else None
+    target_url = f"file:///{html_abs_path.replace(os.sep, '/')}" if html_abs_path else "about:blank"
+
+    context_chunks = retrieve_context(
+        testcase.get("scenario", ""), top_k=5, collection_name=collection_name
+    )
+
+    ui_table = "\n".join([
+        f"{e.tag} | {e.element_type} | name={e.name} | id={e.html_id} | "
+        f"selector={e.selector} | text={e.text}"
+        for e in ui_elements
+    ])
+
+    context_text = "\n".join([c.text for c in context_chunks]) or "No documentation found."
+
+    return f"""
+SYSTEM:
+You are a Playwright (Python async) automation expert. Generate a COMPLETE, RUNNABLE async Python test script.
+
+CRITICAL REQUIREMENTS:
+1. Use async Playwright API (playwright.async_api)
+2. Use `async def main()` with `async with async_playwright() as p:`
+3. NEVER use time.sleep() — Playwright auto-waits
+4. Prefer semantic selectors in this priority order:
+   a. page.get_by_role() — for buttons, links, headings
+   b. page.get_by_label() — for form inputs  
+   c. page.get_by_text() — for text content
+   d. page.get_by_test_id() — for data-testid attributes
+   e. page.locator("css=...") — only as last resort
+5. Navigate explicitly to: "{target_url}"
+6. Include assertions using `expect()` from playwright
+7. Capture screenshot on failure
+8. Handle dialogs with page.on("dialog", ...)
+9. Use headless=True for Chrome
+
+CONTEXT DOCUMENTATION:
+{context_text}
+
+FULL HTML STRUCTURE:
+{html}
+
+UI ELEMENT TABLE:
+{ui_table}
+
+TEST CASE TO IMPLEMENT:
+{json.dumps(testcase, indent=2)}
+
+REQUIRED OUTPUT FORMAT:
+```python
+import asyncio
+from playwright.async_api import async_playwright, expect
+import os
+import platform
+
+async def main():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
+        
+        # Print metadata
+        print(f"BROWSER: chromium")
+        print(f"BROWSER_VERSION: {{browser.version}}")
+        print(f"OS_INFO: {{platform.system()}} {{platform.version()}}")
+        
+        try:
+            # Navigate to target
+            await page.goto("{target_url}")
+            
+            # === TEST STEPS ===
+            # Step 1: [describe step]
+            await page.get_by_label("Username").fill("test_user")
+            
+            # Step 2: [describe step]
+            await page.get_by_role("button", name="Submit").click()
+            
+            # Assertions
+            await expect(page.get_by_text("Welcome")).to_be_visible()
+            
+            print("Test passed!")
+            
+        except Exception as e:
+            print(f"Test failed: {{e}}")
+            # Screenshot on failure
+            screenshot_dir = os.path.abspath(f"test_results/{testcase.get('test_id', 'unknown')}/screenshots")
+            os.makedirs(screenshot_dir, exist_ok=True)
+            import time
+            filepath = os.path.join(screenshot_dir, f"failure_{{int(time.time())}}.png")
+            await page.screenshot(path=filepath, full_page=True)
+            print(f"SCREENSHOT_PATH: {{filepath}}")
+            raise
+            
+        finally:
+            await context.close()
+            await browser.close()
+
+asyncio.run(main())
+```
+
+IMPORTANT:
+- Return ONLY the Python code, NO markdown formatting
+- NEVER use time.sleep() — use await page.wait_for_load_state() if needed
+- ALWAYS use async/await for every Playwright call
+- ALWAYS include screenshot capture on failure
+- For dialog/alert handling, add this BEFORE the action that triggers it:
+  page.on("dialog", lambda dialog: dialog.accept())
+"""
+```
+
+## 6.3 Before vs After Script Examples
+
+### Before (Selenium — Current)
+
+```python
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import time
+import os
+import platform
+
+def handle_alert(driver, accept=True):
+    try:
+        alert = driver.switch_to.alert
+        alert_text = alert.text
+        if accept:
+            alert.accept()
+        time.sleep(0.5)
+        return alert_text
+    except:
+        return None
+
+def save_screenshot_on_failure(driver, test_id):
+    try:
+        screenshot_dir = os.path.abspath(f"test_results/{test_id}/screenshots")
+        os.makedirs(screenshot_dir, exist_ok=True)
+        filepath = os.path.join(screenshot_dir, f"failure_{int(time.time())}.png")
+        driver.save_screenshot(filepath)
+        print(f"SCREENSHOT_PATH: {filepath}")
+        time.sleep(2)
+        return filepath
+    except Exception as e:
+        return None
+
+def print_metadata(driver):
+    caps = driver.capabilities
+    print(f"BROWSER: {caps.get('browserName', 'unknown')}")
+    print(f"BROWSER_VERSION: {caps.get('browserVersion', 'unknown')}")
+    print(f"OS_INFO: {platform.system()} {platform.version()}")
+
+try:
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+    print_metadata(driver)
+    driver.get("file:///path/to/test.html")
+    
+    # Step 1: Enter username
+    username = WebDriverWait(driver, 10).until(
+        EC.visibility_of_element_located((By.CSS_SELECTOR, '#username'))
+    )
+    username.clear()
+    username.send_keys("test_user")
+    
+    # Step 2: Enter password
+    password = driver.find_element(By.CSS_SELECTOR, '#password')
+    password.clear()
+    password.send_keys("test_pass")
+    
+    # Step 3: Click submit
+    submit = WebDriverWait(driver, 10).until(
+        EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[type="submit"]'))
+    )
+    submit.click()
+    handle_alert(driver)
+    time.sleep(1)
+    
+    # Assertion
+    assert "Welcome" in driver.page_source
+    print("Test passed!")
+
+except Exception as e:
+    print(f"Test failed: {e}")
+    if 'driver' in locals():
+        save_screenshot_on_failure(driver, "TC-001")
+    raise
+finally:
+    if 'driver' in locals():
+        driver.quit()
+```
+
+### After (Playwright — Target)
+
+```python
+import asyncio
+from playwright.async_api import async_playwright, expect
+import os
+import platform
+
+async def main():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
+
+        print(f"BROWSER: chromium")
+        print(f"BROWSER_VERSION: {browser.version}")
+        print(f"OS_INFO: {platform.system()} {platform.version()}")
+
+        try:
+            await page.goto("file:///path/to/test.html")
+
+            # Step 1: Enter username
+            await page.get_by_label("Username").fill("test_user")
+
+            # Step 2: Enter password
+            await page.get_by_label("Password").fill("test_pass")
+
+            # Step 3: Click submit (handle any dialog)
+            page.on("dialog", lambda d: d.accept())
+            await page.get_by_role("button", name="Submit").click()
+
+            # Assertion
+            await expect(page.get_by_text("Welcome")).to_be_visible()
+
+            print("Test passed!")
+
+        except Exception as e:
+            print(f"Test failed: {e}")
+            screenshot_dir = os.path.abspath("test_results/TC-001/screenshots")
+            os.makedirs(screenshot_dir, exist_ok=True)
+            import time
+            fp = os.path.join(screenshot_dir, f"failure_{int(time.time())}.png")
+            await page.screenshot(path=fp, full_page=True)
+            print(f"SCREENSHOT_PATH: {fp}")
+            raise
+
+        finally:
+            await context.close()
+            await browser.close()
+
+asyncio.run(main())
+```
+
+**Improvements**: 44 lines vs 72 lines (39% reduction). No `time.sleep()`. No explicit waits. Semantic selectors. Native dialog handling.
+
+## 6.4 Semantic Selector Strategy Rules
+
+The LLM prompt should enforce this selector priority:
+
+| Priority | Selector Type | Example | When to Use |
+|----------|--------------|---------|-------------|
+| 1 | Role | `get_by_role("button", name="Login")` | Buttons, links, headings, checkboxes |
+| 2 | Label | `get_by_label("Email Address")` | Form inputs with associated labels |
+| 3 | Placeholder | `get_by_placeholder("Enter email")` | Inputs with placeholder text |
+| 4 | Text | `get_by_text("Submit Order")` | Visible text content |
+| 5 | Test ID | `get_by_test_id("login-btn")` | Elements with data-testid |
+| 6 | CSS ID | `locator("#email")` | Elements with unique IDs |
+| 7 | CSS Selector | `locator("input[name='email']")` | Fallback for complex selectors |
+
+---
+
+## 7.1 Self-Healing System Migration
+
+### Current Healing Flow (Selenium)
+
+1. Test fails → error message + logs captured
+2. `fix_failures()` constructs repair prompt:
+   - Original `build_prompt()` (Selenium template) + error context
+3. LLM generates new Selenium script
+4. Script saved to DB, execution retried (max 1 retry)
+
+### Target Healing Flow (Playwright)
+
+```mermaid
+flowchart TD
+    A[Test Execution Fails] --> B[Capture Rich Failure Context]
+    B --> C{Failure Type Analysis}
+    
+    C -->|Selector Not Found| D[DOM Re-Analysis]
+    C -->|Timeout| E[Network/Load Analysis]
+    C -->|Assertion Failed| F[State Verification]
+    C -->|Script Error| G[Syntax/API Analysis]
+    
+    D --> H[Extract current DOM snapshot via page.content]
+    D --> I[Extract accessibility tree via page.accessibility.snapshot]
+    E --> J[Analyze trace network tab]
+    F --> K[Screenshot + page state]
+    G --> L[Error stack trace]
+    
+    H & I & J & K & L --> M[Build Enhanced Repair Prompt]
+    
+    M --> N[Include: original test case + error + DOM snapshot]
+    M --> O[Include: accessibility tree for better selectors]
+    M --> P[Include: trace summary for timing issues]
+    
+    N & O & P --> Q[LLM Generates Repaired Script]
+    Q --> R[Validate script syntax]
+    R --> S[Re-execute with fresh context]
+    S --> T{Passed?}
+    T -->|Yes| U[Mark healed, update DB]
+    T -->|No| V{retry_count < max?}
+    V -->|Yes| M
+    V -->|No| W[Mark failed, save all artifacts]
+```
+
+### Enhanced Repair Prompt (Playwright)
+
+```python
+# In workflow.py fix_failures() — updated for Playwright
+
+repair_prompt = f"""
+{base_playwright_prompt}
+
+PREVIOUS EXECUTION FAILED:
+Error: {error_msg}
+Execution Logs: {logs}
+
+CURRENT PAGE DOM (captured at failure):
+{dom_snapshot}
+
+ACCESSIBILITY TREE (for selector recovery):
+{accessibility_tree}
+
+INSTRUCTION:
+The previous Playwright script failed with the error above.
+Analyze the failure and fix the script.
+
+REPAIR GUIDELINES:
+1. If selector not found: Use the DOM snapshot and accessibility tree 
+   to find the correct selector. Prefer get_by_role() or get_by_label().
+2. If timeout: Add wait_for_load_state("networkidle") before the failing action.
+3. If assertion failed: Verify the expected text/state in the DOM snapshot.
+4. NEVER add time.sleep() — use Playwright's built-in waiting.
+5. Keep all other test steps unchanged.
+6. Return the COMPLETE fixed script.
+"""
+```
+
+### How Playwright Improves Healing
+
+| Healing Aspect | Selenium | Playwright | Improvement |
+|---------------|----------|------------|-------------|
+| **Error clarity** | Cryptic `NoSuchElementException` | Clear `"Locator('#btn') not found"` with suggestion | LLM can parse and fix more accurately |
+| **DOM access post-failure** | Requires live driver (may be crashed) | `page.content()` available pre-close | Reliable DOM snapshot for re-analysis |
+| **Accessibility tree** | Not available | `page.accessibility.snapshot()` | Rich semantic context for selector recovery |
+| **Trace replay** | Not available | Full trace with screenshots at each step | LLM can analyze exactly where failure occurred |
+| **Selector alternatives** | Manual CSS/XPath guessing | Role, label, text, testid hierarchy | More resilient selectors on repair |
+| **Timing issues** | Add `sleep()` — unreliable | Auto-wait handles most cases | Fewer timing-related failures |
+| **Network visibility** | Not visible | Trace includes all network requests | Diagnose server-side issues |
+
+### New Healing Opportunities with Playwright
+
+1. **Trace-based debugging**: Save Playwright traces on failure → feed trace summary to LLM for precise repair
+2. **Accessibility-aware repair**: Use `page.accessibility.snapshot()` to find elements by their a11y role/name when CSS selectors break
+3. **DOM diff analysis**: Compare expected DOM (from HTML upload) with actual DOM at failure time
+4. **Network-aware healing**: If test fails due to slow API, Playwright's network interception can add response waiting
+5. **Multi-attempt selector cascade**: Try role → label → text → CSS in order before declaring failure

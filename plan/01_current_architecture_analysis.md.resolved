@@ -1,0 +1,324 @@
+# Selenium → Playwright Migration Blueprint — Part 1
+# CURRENT ARCHITECTURE ANALYSIS
+
+> **Project**: QA Agent — AI-Powered Autonomous Testing Platform  
+> **Scope**: Complete Selenium → Playwright migration  
+> **Author**: Principal Architecture Review  
+> **Date**: 2026-05-17
+
+---
+
+## 1.1 System Overview
+
+The QA Agent is an AI-powered autonomous testing platform with the following core components:
+
+| Layer | Technology | Role |
+|-------|-----------|------|
+| Frontend | React + Vite | SPA with real-time WebSocket updates |
+| Backend API | FastAPI (ASGI) | REST + WebSocket gateway |
+| Agent Orchestrator | LangGraph (StateGraph) | Autonomous workflow: analyze → plan → script → execute → fix → report |
+| LLM Provider | Groq (Llama 3.3 70B) | Test case generation, script generation, self-healing |
+| RAG Pipeline | Pinecone + SentenceTransformers | Context retrieval for grounded test generation |
+| Browser Automation | Selenium + ChromeDriver | Script execution via subprocess |
+| Artifact Capture | OpenCV + PIL | Video recording, screenshot capture |
+| Persistence | Supabase (PostgreSQL + RLS) | Multi-tenant data with row-level security |
+| Scheduling | APScheduler | Cron-based test scheduling |
+| Real-time | python-socketio | WebSocket streaming for execution events |
+
+---
+
+## 1.2 Execution Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant U as User/Frontend
+    participant API as FastAPI
+    participant WS as WebSocket (Socket.IO)
+    participant LG as LangGraph Workflow
+    participant LLM as Groq LLM
+    participant RAG as Pinecone RAG
+    participant EX as Execution Service
+    participant SUB as subprocess (Python)
+    participant SEL as Selenium/ChromeDriver
+    participant DB as Supabase
+
+    U->>API: POST /api/autonomous/start
+    API->>LG: asyncio.create_task(run_autonomous_mode)
+    API-->>U: {status: "started"}
+
+    LG->>LG: analyze_project(state)
+    LG->>DB: Fetch project, HTML files, KB status
+    LG->>RAG: Retrieve context chunks
+    LG->>WS: emit_agent_log("Analyzing...")
+
+    LG->>LG: create_test_plan(state)
+    LG->>LLM: Generate test cases (run_in_executor)
+    LG->>DB: Save test cases
+    LG->>WS: emit_agent_log("Generated N test cases")
+
+    LG->>LG: generate_scripts(state)
+    loop For each test case
+        LG->>LLM: generate_selenium_script (run_in_executor)
+        LG->>DB: Save script to selenium_scripts table
+    end
+    LG->>WS: emit_agent_log("Ready with N scripts")
+
+    LG->>LG: execute_tests(state)
+    loop For each script
+        LG->>EX: execute_test_script(script_content)
+        EX->>SUB: subprocess.run([python, tmp_script.py])
+        SUB->>SEL: Launch Chrome, execute steps
+        SEL-->>SUB: stdout/stderr + exit code
+        SUB-->>EX: ExecutionResult
+        EX-->>LG: Result (status, duration, logs, artifacts)
+    end
+
+    LG->>LG: fix_failures(state) [Self-Healing]
+    alt Has failures AND retry_count < 1
+        LG->>LLM: Repair prompt with error context
+        LG->>DB: Update script
+        LG->>LG: Re-execute (loop back)
+    end
+
+    LG->>LG: generate_report(state)
+    LG->>WS: emit_agent_log("Report compiled")
+```
+
+---
+
+## 1.3 Selenium Service Dependencies
+
+### Direct Selenium Dependencies
+
+| File | Dependency Type | Details |
+|------|----------------|---------|
+| [selenium_service.py](file:///b:/Project/QA_AntiG/qa-agent/backend/services/selenium_service.py) | **Script Generation** | `build_prompt()` generates Selenium-specific Python code templates |
+| [execution_service.py](file:///b:/Project/QA_AntiG/qa-agent/backend/services/execution_service.py) | **Script Execution** | Runs generated scripts via `subprocess.run()` — engine-agnostic runner |
+| [screenshot_service.py](file:///b:/Project/QA_AntiG/qa-agent/backend/services/screenshot_service.py) | **Artifact Capture** | `driver.save_screenshot()`, `driver.capabilities` — Selenium API |
+| [video_recorder.py](file:///b:/Project/QA_AntiG/qa-agent/backend/services/video_recorder.py) | **Video Recording** | `driver.get_screenshot_as_png()` polling loop via OpenCV — Selenium API |
+| [workflow.py](file:///b:/Project/QA_AntiG/qa-agent/backend/agent/workflow.py) | **Orchestration** | Imports `generate_selenium_script`, `load_ui_elements`, `build_prompt` |
+| [agent_api.py](file:///b:/Project/QA_AntiG/qa-agent/backend/api/agent_api.py) | **API Layer** | Routes `/selenium-script`, `/selenium-scripts` — naming coupled |
+| [batch_execution_service.py](file:///b:/Project/QA_AntiG/qa-agent/backend/services/batch_execution_service.py) | **Batch Execution** | Queries `selenium_scripts` table, calls `execute_test_script` |
+| [scheduler_service.py](file:///b:/Project/QA_AntiG/qa-agent/backend/services/scheduler_service.py) | **Scheduled Jobs** | Fetches from `selenium_scripts` table, calls `execute_test_script` |
+| `supabase_schema.sql` | **Database Schema** | Table named `selenium_scripts` with RLS policies |
+| `requirements.txt` | **Dependencies** | `selenium`, `webdriver-manager` |
+
+### Dependency Graph
+
+```mermaid
+graph TD
+    A[agent_api.py] -->|imports| B[selenium_service.py]
+    A -->|imports| C[execution_service.py]
+    D[workflow.py] -->|imports| B
+    D -->|imports| C
+    E[batch_execution_service.py] -->|imports| C
+    F[scheduler_service.py] -->|imports| C
+    G[execution_api.py] -->|imports| C
+    B -->|uses| H[llm_client.py]
+    B -->|uses| I[rag_service.py]
+    B -->|uses| J[html_parser.py]
+    C -->|spawns| K[subprocess → Selenium Script]
+    K -->|launches| L[ChromeDriver/Browser]
+    M[screenshot_service.py] -->|Selenium API| L
+    N[video_recorder.py] -->|Selenium API| L
+
+    style B fill:#ff6b6b,color:#fff
+    style K fill:#ff6b6b,color:#fff
+    style L fill:#ff6b6b,color:#fff
+    style M fill:#ff9f43,color:#fff
+    style N fill:#ff9f43,color:#fff
+```
+
+> [!IMPORTANT]
+> **Red nodes** = tightly coupled to Selenium. **Orange nodes** = partially coupled (use Selenium driver API but could be abstracted).
+
+---
+
+## 1.4 Script Generation Pipeline
+
+The current pipeline works as follows:
+
+1. **UI Element Extraction** — `html_parser.py` parses uploaded HTML → `UIElement` models with CSS selectors
+2. **RAG Context Retrieval** — `rag_service.py` queries Pinecone for relevant documentation chunks
+3. **Prompt Construction** — `selenium_service.build_prompt()` builds a massive prompt containing:
+   - Full HTML source
+   - UI element table (tag, type, name, id, selector)
+   - RAG context chunks
+   - Test case JSON
+   - **Selenium-specific template** with exact import requirements, helper functions, and code structure
+4. **LLM Generation** — `llm.generate(prompt)` via Groq API (synchronous, run in executor)
+5. **Response Cleaning** — Strip markdown code fences
+6. **Persistence** — Save to `selenium_scripts` table in Supabase
+
+### Critical Coupling Points in Prompt Template
+
+The prompt in `build_prompt()` (lines 81-245 of `selenium_service.py`) is **entirely Selenium-specific**:
+
+- Hardcoded imports: `from selenium import webdriver`, `WebDriverWait`, `expected_conditions`
+- Hardcoded driver setup: `webdriver.Chrome(service=Service(ChromeDriverManager().install()))`
+- Hardcoded helper functions: `handle_alert(driver)`, `save_screenshot_on_failure(driver, test_id)`
+- Hardcoded patterns: `driver.find_element(By.CSS_SELECTOR, ...)`, `driver.quit()`
+- Explicit `time.sleep()` usage in generated code
+- Alert handling via `driver.switch_to.alert`
+
+---
+
+## 1.5 Self-Healing Flow
+
+The self-healing system is implemented in [workflow.py → fix_failures()](file:///b:/Project/QA_AntiG/qa-agent/backend/agent/workflow.py#L366-L474):
+
+```mermaid
+flowchart TD
+    A[execute_tests] --> B{Has failures?}
+    B -->|No| C[generate_report]
+    B -->|Yes| D{retry_count >= 1?}
+    D -->|Yes| C
+    D -->|No| E[fix_failures]
+    E --> F[For each failed test]
+    F --> G[Get original test case]
+    G --> H[Build base prompt with context]
+    H --> I[Append error + logs to repair prompt]
+    I --> J[LLM generates new script]
+    J --> K[Strip markdown fences]
+    K --> L[Update DB: delete old + insert new]
+    L --> M[Update state scripts list]
+    M --> N[Clear execution_results]
+    N --> O[Increment retry_count → 1]
+    O --> P[should_retry → "retry"]
+    P --> A
+```
+
+> [!WARNING]
+> **Current limitation**: Self-healing is capped at 1 retry. The repair prompt includes the original base prompt (Selenium-specific) plus the error context. This means the healing is also Selenium-coupled.
+
+---
+
+## 1.6 Browser Execution Flow
+
+**Current model**: Out-of-process execution via subprocess.
+
+```mermaid
+flowchart LR
+    A[FastAPI Process] -->|write tmp .py file| B[Temp Script File]
+    B -->|subprocess.run| C[New Python Process]
+    C -->|import selenium| D[ChromeDriver Manager]
+    D -->|download/cache| E[ChromeDriver Binary]
+    E -->|launch| F[Chrome Browser]
+    F -->|execute test steps| G[DOM Interactions]
+    G -->|stdout: SCREENSHOT_PATH, BROWSER, etc.| C
+    C -->|exit code + stdout/stderr| A
+    A -->|parse metadata from stdout| H[ExecutionResult]
+```
+
+**Key observations**:
+- Each test spawns a **new Python process** and a **new browser instance**
+- No browser pooling or reuse
+- ChromeDriver is downloaded/cached by `webdriver-manager` on first run
+- Metadata is communicated via **stdout parsing** (SCREENSHOT_PATH:, BROWSER:, VIDEO_PATH:, etc.)
+- 60-second hard timeout via `subprocess.run(timeout=60)`
+- Script runs synchronously within subprocess; async boundary is `asyncio.to_thread()`
+
+---
+
+## 1.7 WebSocket Streaming Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant FE as Frontend (Socket.IO Client)
+    participant SIO as Socket.IO Server (/ws)
+    participant API as FastAPI Routes
+    participant EX as Execution Service
+
+    FE->>SIO: connect
+    SIO-->>FE: connected
+
+    FE->>SIO: subscribe_execution({execution_id})
+    SIO->>SIO: enter_room(sid, execution_id)
+    SIO-->>FE: subscribed
+
+    API->>EX: run_test_background()
+    EX->>SIO: emit_started(execution_id)
+    SIO-->>FE: execution_started
+
+    EX->>SIO: emit_progress(execution_id, step, total, msg)
+    SIO-->>FE: execution_progress
+
+    EX->>SIO: emit_completed(execution_id, status, duration)
+    SIO-->>FE: execution_completed
+
+    FE->>SIO: unsubscribe_execution({execution_id})
+    SIO->>SIO: leave_room(sid, execution_id)
+```
+
+> [!NOTE]
+> WebSocket is **engine-agnostic** — it emits events about execution status, not browser internals. This is a clean boundary that requires **zero changes** during migration.
+
+---
+
+## 1.8 Artifact Generation Pipeline
+
+| Artifact | Current Implementation | Selenium Coupling |
+|----------|----------------------|-------------------|
+| **Screenshots** | `driver.save_screenshot()` in generated scripts | **High** — embedded in LLM-generated code |
+| **Screenshots** | `screenshot_service.capture_screenshot(driver)` | **High** — uses `driver.save_screenshot()` |
+| **Video** | `video_recorder.ScreenRecorder(driver)` — polls `driver.get_screenshot_as_png()` | **Very High** — threading + Selenium polling loop |
+| **Logs** | Captured from subprocess stdout/stderr | **None** — engine-agnostic |
+| **Metadata** | Parsed from stdout (BROWSER:, OS_INFO:, etc.) | **Medium** — format is Selenium-specific |
+
+---
+
+## 1.9 Async vs Sync Execution Boundaries
+
+| Component | Execution Model | Bottleneck? |
+|-----------|----------------|-------------|
+| FastAPI routes | `async` | No |
+| WebSocket emitter | `async` | No |
+| LangGraph workflow nodes | `async` | No (but calls sync via executor) |
+| `LLMClient.generate()` | **Synchronous** — wrapped in `run_in_executor` | Yes — blocks thread pool |
+| `generate_selenium_script()` | **Synchronous** | Yes — blocks thread pool |
+| `execute_test_script()` | **Async** wrapper → `asyncio.to_thread(run_script_sync)` | Yes — subprocess blocks thread |
+| `subprocess.run()` | **Synchronous** (blocking) | **Major bottleneck** |
+| Selenium browser operations | **Synchronous** | **Major bottleneck** |
+| `ScreenRecorder._record_loop()` | **Threading** (dedicated thread) | Memory-heavy |
+| Supabase client calls | **Synchronous** | Minor |
+| Pinecone queries | **Synchronous** | Minor |
+
+---
+
+## 1.10 Identified Issues
+
+### Tightly Coupled Modules
+
+| Module | Coupling Level | Reason |
+|--------|---------------|--------|
+| `selenium_service.py` | 🔴 **Critical** | Entire prompt template is Selenium-specific |
+| `workflow.py` | 🟠 **High** | Imports from `selenium_service`, references "selenium" in naming |
+| `agent_api.py` | 🟠 **High** | Route names: `/selenium-script`, `/selenium-scripts` |
+| `screenshot_service.py` | 🟡 **Medium** | Uses `driver.capabilities`, `driver.save_screenshot()` |
+| `video_recorder.py` | 🔴 **Critical** | Entire class built around `driver.get_screenshot_as_png()` |
+| `supabase_schema.sql` | 🟡 **Medium** | Table named `selenium_scripts` |
+
+### Scalability Bottlenecks
+
+1. **One browser per subprocess** — no pooling, no reuse, cold-start on every test
+2. **ChromeDriver download** — `webdriver-manager` downloads on first use per environment
+3. **Sequential execution** — batch tests run sequentially (no parallel browser sessions)
+4. **Thread pool exhaustion** — sync LLM calls + sync subprocess = thread starvation under load
+5. **No execution queue** — concurrent requests can overload the system
+6. **Video recording via screenshot polling** — extremely memory-intensive, CPU-bound
+
+### Containerization Issues
+
+1. **ChromeDriver binary management** — requires exact version matching with installed Chrome
+2. **No headless configuration abstraction** — headless flags are embedded in generated scripts
+3. **File path dependencies** — `file:///` URLs for local HTML testing break in containers
+4. **WebDriver Manager network access** — downloads binaries at runtime, fails in air-gapped environments
+5. **OpenCV dependency** — heavy native dependency for video recording
+
+### Deployment Pain Points
+
+1. **Chrome/ChromeDriver version drift** — frequent breakage on updates
+2. **Platform-specific paths** — Windows `os.sep` handling in URL generation
+3. **No browser health checks** — zombie Chrome processes on crash
+4. **No resource cleanup** — temp files may accumulate on failure
+5. **Single-node architecture** — no distributed execution capability

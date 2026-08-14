@@ -1,0 +1,418 @@
+# Selenium → Playwright Migration Blueprint — Part 3
+# TARGET PLAYWRIGHT ARCHITECTURE
+
+---
+
+## 3.1 High-Level Target Architecture
+
+```mermaid
+graph TB
+    subgraph "Frontend (React + Vite)"
+        FE[React SPA]
+        WS_C[Socket.IO Client]
+    end
+
+    subgraph "FastAPI Backend (ASGI)"
+        API[REST API Routes]
+        WS_S[Socket.IO Server]
+        AUTH[Supabase Auth Middleware]
+    end
+
+    subgraph "Agent Orchestrator"
+        LG[LangGraph StateGraph]
+        AN[analyze_project]
+        PL[create_test_plan]
+        GS[generate_scripts]
+        EX[execute_tests]
+        FX[fix_failures]
+        RP[generate_report]
+    end
+
+    subgraph "Automation Abstraction Layer"
+        DF[DriverFactory]
+        BD[BaseDriver Interface]
+        PD[PlaywrightDriver]
+        SD[SeleniumDriver - Legacy]
+    end
+
+    subgraph "Playwright Execution Engine"
+        BPM[BrowserPoolManager]
+        BP[Browser Pool - Chromium/Firefox/WebKit]
+        BCM[BrowserContextManager]
+        EC[ExecutionContext]
+        ART[ArtifactManager - screenshots/video/trace]
+    end
+
+    subgraph "Script Generation"
+        SG[ScriptGenerator]
+        PT[Playwright Prompt Templates]
+        RAG[RAG Context - Pinecone]
+        LLM[Groq LLM]
+    end
+
+    subgraph "Persistence"
+        DB[(Supabase PostgreSQL)]
+        VS[(Pinecone Vector Store)]
+    end
+
+    FE --> API
+    WS_C <--> WS_S
+    API --> LG
+    LG --> AN & PL & GS & EX & FX & RP
+    GS --> SG
+    SG --> PT & RAG & LLM
+    EX --> DF
+    DF --> BD
+    BD --> PD
+    BD -.-> SD
+    PD --> BPM
+    BPM --> BP
+    BP --> BCM
+    BCM --> EC
+    EC --> ART
+    EX --> WS_S
+    AN & PL & GS --> DB
+    SG --> VS
+```
+
+## 3.2 Browser Execution Architecture
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle: System startup
+
+    Idle --> Launching: execute_test()
+    Launching --> BrowserReady: Browser launched/acquired from pool
+    BrowserReady --> ContextCreated: new_context(video, tracing)
+    ContextCreated --> PageReady: new_page()
+    PageReady --> Executing: Run test steps
+    Executing --> Capturing: Capture artifacts
+    Capturing --> ContextClosed: Close context (saves video)
+    ContextClosed --> BrowserReady: Return browser to pool
+    ContextClosed --> Idle: No pending tests
+
+    Executing --> Failed: Test failure
+    Failed --> SelfHealing: retry_count < max
+    SelfHealing --> ContextCreated: New context for retry
+    Failed --> Capturing: Max retries exceeded
+
+    Executing --> TimedOut: Timeout exceeded
+    TimedOut --> Capturing: Force artifact capture
+    
+    BrowserReady --> Recycled: Max contexts reached
+    Recycled --> Launching: Launch fresh browser
+```
+
+## 3.3 Async Execution Architecture
+
+```mermaid
+sequenceDiagram
+    participant API as FastAPI (async)
+    participant WF as LangGraph Workflow (async)
+    participant DF as DriverFactory
+    participant BP as BrowserPool
+    participant CTX as BrowserContext
+    participant PG as Page
+    participant ART as ArtifactManager
+    participant WS as WebSocket
+
+    API->>WF: await agent_app.ainvoke(inputs)
+    WF->>DF: await factory.create_driver("playwright")
+    DF->>BP: await pool.acquire_browser()
+    BP-->>DF: browser instance
+    DF-->>WF: PlaywrightDriver
+
+    WF->>WS: emit("execution_started")
+
+    loop For each test script
+        WF->>CTX: await browser.new_context(record_video=True)
+        CTX->>PG: await context.new_page()
+        
+        Note over PG: Execute async Playwright steps
+        PG->>PG: await page.goto(url)
+        PG->>PG: await page.fill(selector, value)
+        PG->>PG: await page.click(selector)
+        
+        alt Test passes
+            PG->>ART: await page.screenshot()
+            CTX->>ART: await context.tracing.stop()
+        else Test fails
+            PG->>ART: await page.screenshot(full_page=True)
+            CTX->>ART: Save trace + video
+            WF->>WS: emit("test_failed", error)
+        end
+        
+        CTX->>CTX: await context.close()
+    end
+
+    WF->>BP: await pool.release_browser(browser)
+    WF->>WS: emit("execution_completed")
+```
+
+## 3.4 Browser Pool Architecture
+
+```python
+# Target: backend/automation/browser_pool.py
+
+class BrowserPoolConfig:
+    max_browsers: int = 3            # Max concurrent browser instances
+    max_contexts_per_browser: int = 10  # Recycle after N contexts
+    browser_idle_timeout: int = 300   # Close idle browsers after 5 min
+    launch_args: list = [
+        "--disable-dev-shm-usage",   # Docker-friendly
+        "--disable-gpu",
+        "--no-sandbox"
+    ]
+
+class BrowserPoolManager:
+    """
+    Manages a pool of Playwright browser instances.
+    
+    Lifecycle:
+    1. On first request: launch browser, add to pool
+    2. On subsequent requests: reuse existing browser via new context
+    3. After max_contexts: recycle browser (close + relaunch)
+    4. On idle timeout: close browser to free resources
+    5. On shutdown: close all browsers gracefully
+    """
+    
+    # Pool state
+    _browsers: Dict[str, BrowserSlot]  # id -> {browser, context_count, created_at}
+    _semaphore: asyncio.Semaphore      # Limit concurrent browsers
+    _playwright: Playwright            # Single playwright instance
+    
+    async def acquire(self) -> Browser:
+        """Get a browser from pool or launch new one."""
+        
+    async def release(self, browser_id: str):
+        """Return browser to pool, increment context count."""
+        
+    async def _recycle(self, browser_id: str):
+        """Close and relaunch a browser that hit max contexts."""
+        
+    async def shutdown(self):
+        """Gracefully close all browsers and playwright instance."""
+```
+
+```mermaid
+graph TD
+    subgraph "Browser Pool Manager"
+        SEM[Semaphore - max 3]
+        
+        subgraph "Slot 1"
+            B1[Chromium Browser #1]
+            C1A[Context A - Test TC-001]
+            C1B[Context B - Test TC-002]
+        end
+        
+        subgraph "Slot 2"
+            B2[Chromium Browser #2]
+            C2A[Context C - Test TC-003]
+        end
+        
+        subgraph "Slot 3 - Idle"
+            B3[Chromium Browser #3]
+            IDLE[Idle - timeout: 4:30]
+        end
+    end
+    
+    REQ[New Test Request] --> SEM
+    SEM -->|slot available| B1
+    SEM -->|slot available| B2
+    SEM -->|all busy| WAIT[Wait for release]
+```
+
+## 3.5 Artifact Pipeline Architecture
+
+```mermaid
+flowchart TD
+    subgraph "During Execution"
+        A[BrowserContext Created] -->|record_video=path| B[Auto Video Recording]
+        A -->|tracing.start| C[Trace Recording]
+        D[Page Interactions] -->|on failure| E[page.screenshot]
+        D -->|on each step| F[Optional step screenshots]
+    end
+
+    subgraph "After Context Close"
+        B --> G[video.path → saved MP4/WebM]
+        C --> H[tracing.stop → trace.zip]
+        E --> I[screenshot.png]
+    end
+
+    subgraph "Artifact Manager"
+        G --> J[ArtifactManager.save_video]
+        H --> K[ArtifactManager.save_trace]
+        I --> L[ArtifactManager.save_screenshot]
+        J & K & L --> M[test_results/test_id/]
+        M --> N[Update DB: test_executions]
+    end
+```
+
+**Key improvement**: Playwright's built-in video recording replaces the entire `video_recorder.py` (83 lines of OpenCV + threading code) with a single parameter: `record_video={"dir": "path/"}`.
+
+## 3.6 Target Class Hierarchy
+
+```mermaid
+classDiagram
+    class BaseDriver {
+        <<abstract>>
+        +engine_name: str
+        +launch() → Browser
+        +create_context(config) → ExecutionContext
+        +close()
+        +screenshot(path) → str
+        +get_browser_info() → dict
+    }
+
+    class PlaywrightDriver {
+        -_playwright: Playwright
+        -_browser: Browser
+        -_pool: BrowserPoolManager
+        +launch()
+        +create_context(config) → PlaywrightExecutionContext
+        +close()
+        +screenshot(path) → str
+    }
+
+    class SeleniumDriver {
+        -_driver: WebDriver
+        +launch()
+        +create_context(config) → SeleniumExecutionContext
+        +close()
+        +screenshot(path) → str
+    }
+
+    class DriverFactory {
+        +create(engine: str, config: dict) → BaseDriver
+        +get_default_engine() → str
+    }
+
+    class ExecutionContext {
+        <<abstract>>
+        +page: Any
+        +navigate(url)
+        +fill(selector, value)
+        +click(selector)
+        +get_text(selector) → str
+        +wait_for(selector, state, timeout)
+        +screenshot(path) → str
+        +close()
+    }
+
+    class PlaywrightExecutionContext {
+        -_context: BrowserContext
+        -_page: Page
+        -_tracing: bool
+        +start_tracing()
+        +stop_tracing(path)
+        +video_path() → str
+    }
+
+    class ArtifactManager {
+        +save_screenshot(context, test_id) → str
+        +save_video(context, test_id) → str
+        +save_trace(context, test_id) → str
+        +cleanup_old_artifacts(days)
+    }
+
+    class BrowserPoolManager {
+        -_browsers: Dict
+        -_semaphore: Semaphore
+        +acquire() → Browser
+        +release(browser_id)
+        +shutdown()
+    }
+
+    BaseDriver <|-- PlaywrightDriver
+    BaseDriver <|-- SeleniumDriver
+    DriverFactory --> BaseDriver
+    PlaywrightDriver --> BrowserPoolManager
+    ExecutionContext <|-- PlaywrightExecutionContext
+    PlaywrightDriver --> ArtifactManager
+```
+
+## 3.7 Execution State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> QUEUED: Test submitted
+
+    QUEUED --> PREPARING: Worker picks up
+    PREPARING --> BROWSER_ACQUIRED: Pool returns browser
+    BROWSER_ACQUIRED --> CONTEXT_READY: Context + page created
+    
+    CONTEXT_READY --> RUNNING: Script execution starts
+    RUNNING --> STEP_EXECUTING: Each test step
+    STEP_EXECUTING --> STEP_EXECUTING: Next step
+    STEP_EXECUTING --> RUNNING: Step completed
+    
+    RUNNING --> PASSED: All steps pass
+    RUNNING --> FAILED: Assertion failure
+    RUNNING --> ERROR: Unexpected error
+    RUNNING --> TIMED_OUT: Timeout exceeded
+    RUNNING --> CANCELLED: User cancellation
+    
+    PASSED --> COLLECTING_ARTIFACTS: Save screenshots/video/trace
+    FAILED --> COLLECTING_ARTIFACTS
+    ERROR --> COLLECTING_ARTIFACTS
+    TIMED_OUT --> COLLECTING_ARTIFACTS
+    CANCELLED --> CLEANUP
+    
+    COLLECTING_ARTIFACTS --> COMPLETED: Results persisted
+    CLEANUP --> COMPLETED
+    
+    COMPLETED --> [*]
+    
+    FAILED --> HEALING: retry_count < max AND auto_heal=true
+    HEALING --> CONTEXT_READY: New context for retry
+```
+
+## 3.8 WebSocket Streaming Architecture (Unchanged)
+
+> [!NOTE]
+> The WebSocket layer requires **zero changes**. It emits abstract execution events (started, progress, completed, agent_log) that are completely engine-agnostic. The `ExecutionEventEmitter` class works identically with Playwright.
+
+The only enhancement opportunity is adding Playwright-specific trace URLs to completion events:
+
+```python
+# Enhanced completion event
+await emitter.emit_completed(
+    execution_id=execution_id,
+    status="failed",
+    duration=12.5,
+    error_message="Element not found",
+    trace_url="/api/agent/executions/{id}/trace",  # NEW: Playwright trace
+    video_url="/api/agent/executions/{id}/video"   # Already exists
+)
+```
+
+## 3.9 Target Folder Structure
+
+```
+backend/
+├── automation/                    # NEW: Abstraction layer
+│   ├── __init__.py
+│   ├── base_driver.py            # BaseDriver ABC
+│   ├── playwright_driver.py      # PlaywrightDriver implementation
+│   ├── selenium_driver.py        # SeleniumDriver (legacy wrapper)
+│   ├── driver_factory.py         # DriverFactory
+│   ├── execution_context.py      # ExecutionContext ABC + implementations
+│   ├── browser_pool.py           # BrowserPoolManager
+│   ├── artifact_manager.py       # ArtifactManager
+│   └── config.py                 # Automation engine configuration
+├── agent/
+│   └── workflow.py               # MODIFIED: Use abstraction layer
+├── api/
+│   ├── agent_api.py              # MODIFIED: Rename routes
+│   ├── execution_api.py          # MODIFIED: Add trace endpoint
+│   └── ...
+├── services/
+│   ├── script_generator.py       # NEW: Replaces selenium_service.py
+│   ├── execution_service.py      # MODIFIED: Use abstraction layer
+│   ├── batch_execution_service.py # MODIFIED: Use abstraction layer
+│   ├── selenium_service.py       # DEPRECATED: Keep for legacy
+│   ├── screenshot_service.py     # DEPRECATED: Replaced by ArtifactManager
+│   ├── video_recorder.py         # DEPRECATED: Replaced by Playwright built-in
+│   └── ...
+└── ...
+```

@@ -1,0 +1,209 @@
+# Selenium → Playwright Migration Blueprint — Part 2
+# GAP ANALYSIS: Selenium vs Playwright for THIS Project
+
+---
+
+## 2.1 Execution Model Differences
+
+| Aspect | Selenium (Current) | Playwright (Target) | Impact |
+|--------|-------------------|---------------------|--------|
+| **API Model** | Synchronous (blocking) | Native async (`async/await`) | ✅ Aligns perfectly with FastAPI's ASGI model |
+| **Browser Launch** | `webdriver.Chrome()` — cold start every time | `browser = await playwright.chromium.launch()` — supports pooling | ✅ 3-5x faster cold starts |
+| **Driver Management** | `webdriver-manager` downloads ChromeDriver binary | `playwright install` — one-time, version-locked | ✅ Eliminates version drift crashes |
+| **Page Lifecycle** | Single page per driver instance | Multiple `BrowserContext` + `Page` per browser | ✅ True isolation without process overhead |
+| **Waiting** | Explicit `WebDriverWait` + `time.sleep()` | Auto-waiting built into every action | ✅ Eliminates flaky wait logic in generated scripts |
+| **Selectors** | CSS/XPath only | CSS, XPath, text, role, testid, label | ✅ Better for AI-generated semantic selectors |
+| **Script Format** | Synchronous Python | `async def` Python with `await` | 🟡 All generated scripts must change format |
+
+## 2.2 Async Architecture Compatibility
+
+**Current problem**: Selenium is synchronous. The codebase uses these workarounds:
+
+```python
+# workflow.py line 278-279 — LLM calls wrapped in executor
+loop = asyncio.get_event_loop()
+script_content = await loop.run_in_executor(None, generate_selenium_script, test, html_path, collection_name)
+
+# execution_service.py line 135 — subprocess wrapped in to_thread
+result = await asyncio.to_thread(run_script_sync)
+```
+
+**After Playwright**: These workarounds become unnecessary:
+
+```python
+# Direct async — no executor needed
+page = await context.new_page()
+await page.goto(url)
+await page.fill('#username', 'test')
+await page.click('button[type="submit"]')
+```
+
+> [!TIP]
+> Playwright's native async model eliminates thread pool exhaustion under concurrent load — the single biggest scalability improvement.
+
+## 2.3 Selector Strategy Differences
+
+| Strategy | Selenium | Playwright | AI-Script Impact |
+|----------|----------|------------|-----------------|
+| CSS Selectors | `By.CSS_SELECTOR` | `page.locator("css=...")` | Equivalent |
+| ID Selectors | `By.ID` | `page.locator("#id")` | Equivalent |
+| XPath | `By.XPATH` | `page.locator("xpath=...")` | Equivalent |
+| **Text Content** | Not native | `page.get_by_text("Login")` | ✅ More resilient to DOM changes |
+| **Role** | Not native | `page.get_by_role("button", name="Submit")` | ✅ Accessibility-first |
+| **Label** | Not native | `page.get_by_label("Username")` | ✅ Form-friendly |
+| **Test ID** | Manual: `[data-testid="x"]` | `page.get_by_test_id("x")` | ✅ Best practice built-in |
+| **Chained** | Complex Java-style | `page.locator(".form").locator("input").first` | ✅ Cleaner composition |
+
+> [!IMPORTANT]
+> Playwright's semantic selectors (role, text, label) are a game-changer for AI-generated scripts. The LLM can produce more resilient code that survives UI refactors — directly improving self-healing success rates.
+
+## 2.4 Waiting Mechanism Differences
+
+| Scenario | Selenium | Playwright |
+|----------|----------|------------|
+| Element visible | `WebDriverWait(driver, 10).until(EC.visibility_of_element_located(...))` | Auto-wait (built-in) |
+| Element clickable | `WebDriverWait(driver, 10).until(EC.element_to_be_clickable(...))` | Auto-wait |
+| Navigation | `driver.get(url)` + manual wait | `await page.goto(url, wait_until="networkidle")` |
+| AJAX completion | `time.sleep(2)` (common in generated scripts) | `await page.wait_for_load_state("networkidle")` |
+| Custom condition | `WebDriverWait + lambda` | `await page.wait_for_function("...")` |
+
+**Current generated scripts contain**: `time.sleep(0.5)`, `time.sleep(2)` — these disappear with Playwright's auto-waiting.
+
+## 2.5 Browser Lifecycle Handling
+
+```mermaid
+graph LR
+    subgraph "Selenium (Current)"
+        A1[ChromeDriverManager.install] --> A2[webdriver.Chrome]
+        A2 --> A3[Single Page]
+        A3 --> A4[driver.quit]
+        A4 --> A5[Process dies]
+    end
+
+    subgraph "Playwright (Target)"
+        B1[playwright.chromium.launch] --> B2[browser.new_context]
+        B2 --> B3[context.new_page]
+        B3 --> B4[Execute test]
+        B4 --> B5[context.close]
+        B5 -->|Reuse browser| B2
+        B2 -.->|Pool management| B1
+    end
+```
+
+**Key difference**: Playwright supports browser reuse via BrowserContext isolation. One browser process can serve many tests with full isolation.
+
+## 2.6 Docker & Kubernetes Compatibility
+
+| Concern | Selenium | Playwright |
+|---------|----------|------------|
+| **Base Image** | Need Chrome + ChromeDriver + matching versions | `mcr.microsoft.com/playwright/python:v1.x` (all included) |
+| **Image Size** | ~1.2GB (Chrome + deps) | ~1.4GB (but more reliable) |
+| **Version Sync** | Manual — `webdriver-manager` may fail | Automatic — `playwright install` pins exact versions |
+| **Headless** | `--headless=new` flag (varies by version) | `headless=True` parameter (consistent) |
+| **Sandbox** | `--no-sandbox` required in Docker | Works out of box |
+| **K8s Scaling** | Need Selenium Grid or per-pod Chrome | Simple per-pod deployment |
+| **ARM Support** | Limited ChromeDriver ARM builds | Full ARM support |
+| **Resource Limits** | Hard to predict memory per Chrome instance | `playwright.chromium.launch(args=['--disable-dev-shm-usage'])` |
+
+> [!TIP]
+> Playwright's official Docker images eliminate the #1 deployment pain point: Chrome/ChromeDriver version drift. This alone justifies migration for production deployments.
+
+## 2.7 AI-Generated Script Quality
+
+| Quality Metric | Selenium Scripts | Playwright Scripts |
+|---------------|-----------------|-------------------|
+| **Lines of code** | ~80-120 per test | ~40-60 per test |
+| **Import overhead** | 6+ imports (webdriver, Service, ChromeDriverManager, WebDriverWait, EC, By) | 2 imports (playwright.async_api, asyncio) |
+| **Boilerplate** | Heavy (driver setup, helper functions, alert handling) | Minimal (async context manager) |
+| **Error-proneness** | High (timing issues, stale elements) | Low (auto-waiting, auto-retry) |
+| **Self-healing friendliness** | Low (complex error messages, unclear failures) | High (clear error messages, trace files) |
+| **Token efficiency** | ~800 tokens per script prompt template | ~400 tokens (simpler template) |
+
+## 2.8 Performance Comparison (Projected)
+
+| Metric | Selenium | Playwright (Estimated) |
+|--------|----------|----------------------|
+| Browser cold start | 3-5s | 1-2s |
+| Page navigation | 1-2s | 0.5-1s |
+| Element interaction | 50-200ms + explicit waits | 10-50ms (auto-wait) |
+| Screenshot capture | 200-500ms | 50-100ms |
+| Video recording | Custom OpenCV polling (CPU-heavy) | Built-in (`context.tracing`, video) |
+| Memory per session | ~300-500MB (Chrome + ChromeDriver process) | ~200-350MB (shared browser) |
+| Concurrent sessions (8GB RAM) | 4-6 | 8-12 (with context isolation) |
+
+## 2.9 Migration Risk Matrix
+
+| Risk | Probability | Impact | Mitigation |
+|------|-------------|--------|------------|
+| **LLM generates invalid Playwright code** | Medium | High | Dual-engine support during transition; validation layer |
+| **Existing cached scripts break** | High | Medium | Migration script to regenerate; keep old scripts as fallback |
+| **Alert handling differences** | Medium | Medium | Playwright `page.on("dialog")` is actually simpler |
+| **File:// URL behavior differs** | Low | Medium | Test early; Playwright handles file:// well |
+| **CSS selector incompatibility** | Very Low | Low | 99% compatible; edge cases in pseudo-selectors |
+| **WebSocket integration breaks** | Very Low | High | WebSocket layer is engine-agnostic (no changes needed) |
+| **Self-healing prompts produce wrong code** | Medium | High | Update repair prompts to Playwright-specific templates |
+| **DB table name `selenium_scripts`** | N/A | Low | Rename to `automation_scripts` with migration |
+| **Video recording breaks** | Low | Medium | Playwright has built-in video — actually improves |
+| **Concurrent execution issues** | Low | Medium | Playwright async is simpler than Selenium threading |
+
+## 2.10 Technical Debt Analysis
+
+### Debt Eliminated by Migration
+
+| Current Debt | How Playwright Fixes It |
+|-------------|------------------------|
+| `time.sleep()` in generated scripts | Auto-waiting eliminates all sleeps |
+| Thread pool exhaustion from sync Selenium | Native async removes thread dependency |
+| ChromeDriver version management | Bundled browser binaries |
+| Custom video recorder (OpenCV + threading) | Built-in `video` option on BrowserContext |
+| Screenshot polling for video | Native video recording at browser level |
+| Complex alert handling helpers | Simple `page.on("dialog")` listener |
+| `webdriver-manager` runtime downloads | Compile-time `playwright install` |
+
+### Debt Introduced by Migration
+
+| New Concern | Complexity | Mitigation |
+|-------------|-----------|------------|
+| Abstraction layer maintenance | Medium | Clean interfaces minimize ongoing cost |
+| Dual-engine testing during transition | High (temporary) | Feature flags; A/B testing |
+| Playwright version upgrades | Low | Pinned in requirements; CI testing |
+| Team learning curve | Low | Playwright API is simpler than Selenium |
+| Async script format in generated code | Medium | Clear prompt templates handle this |
+
+## 2.11 Production-Readiness Comparison
+
+| Dimension | Selenium | Playwright | Winner |
+|-----------|----------|------------|--------|
+| API Stability | ✅ Very mature | ✅ Mature (v1.x stable) | Tie |
+| Error Messages | 🟡 Often cryptic | ✅ Clear and actionable | Playwright |
+| Debugging | 🟡 Manual screenshots | ✅ Traces, screenshots, video, HAR | Playwright |
+| CI/CD Integration | 🟡 Requires Selenium Grid | ✅ Works natively | Playwright |
+| Docker Support | 🟡 Manual Chrome setup | ✅ Official images | Playwright |
+| Parallel Execution | 🟡 Via Grid or threading | ✅ Native async concurrency | Playwright |
+| Cross-Browser | ✅ Chrome, Firefox, Edge, Safari | ✅ Chromium, Firefox, WebKit | Tie |
+| Community/Docs | ✅ Largest community | ✅ Rapidly growing, excellent docs | Tie |
+| Python async | ❌ Not supported | ✅ Native | Playwright |
+| Auto-waiting | ❌ Manual | ✅ Built-in | Playwright |
+| Network Interception | 🟡 Via proxy | ✅ Native `route()` | Playwright |
+| Tracing | ❌ Not available | ✅ Full trace with viewer | Playwright |
+
+## 2.12 What Improves After Migration
+
+1. **Execution speed** — 2-3x faster test execution from auto-waiting + async
+2. **Reliability** — Auto-waiting eliminates flaky tests from timing issues
+3. **Scalability** — Native async + context isolation = more concurrent sessions
+4. **AI script quality** — Simpler generated code = fewer LLM errors
+5. **Self-healing** — Trace files provide rich failure context for LLM repair
+6. **Deployment** — Official Docker images eliminate driver management
+7. **Video recording** — Built-in, no OpenCV dependency
+8. **Debugging** — Trace viewer for step-by-step replay
+9. **Memory usage** — Browser context sharing reduces per-test overhead
+10. **Developer experience** — Cleaner API, better error messages
+
+## 2.13 What Becomes More Complex
+
+1. **Transition period** — Running dual engines requires abstraction layer
+2. **Script regeneration** — All cached `selenium_scripts` must be regenerated
+3. **Prompt engineering** — Must carefully redesign LLM prompt templates
+4. **Database migration** — Table/column renaming required
+5. **API naming** — Routes like `/selenium-script` need updating

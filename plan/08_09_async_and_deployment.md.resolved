@@ -1,0 +1,373 @@
+# Selenium → Playwright Migration Blueprint — Parts 8 & 9
+# ASYNC REFACTORING + DEPLOYMENT MIGRATION
+
+---
+
+## 8.1 Current Blocking Operations Inventory
+
+| Operation | File | Blocking Type | Current Workaround | Post-Migration |
+|-----------|------|--------------|-------------------|---------------|
+| `LLMClient.generate()` | `llm_client.py` | **I/O-bound** (HTTP to Groq) | `run_in_executor()` | Keep executor OR switch to async HTTP client |
+| `generate_selenium_script()` | `selenium_service.py` | **I/O-bound** (LLM call) | `run_in_executor()` | Same |
+| `subprocess.run()` | `execution_service.py` | **Process-bound** (60s timeout) | `asyncio.to_thread()` | Eliminated — Playwright runs in-process async |
+| `VectorStore.query()` | `vectorstore.py` | **I/O-bound** (Pinecone API) | None (runs sync) | Wrap in executor or use async Pinecone SDK |
+| `VectorStore.add_chunks()` | `vectorstore.py` | **I/O-bound** | None | Wrap in executor |
+| Supabase client calls | Various | **I/O-bound** | None | Use async Supabase client |
+| `SentenceTransformer.encode()` | `vectorstore.py` | **CPU-bound** | None | Keep in executor (CPU work) |
+| `ScreenRecorder._record_loop()` | `video_recorder.py` | **CPU-bound** (OpenCV) | Dedicated thread | Eliminated — Playwright built-in video |
+| `parse_html()` | `html_parser.py` | **CPU-bound** (BeautifulSoup) | None | Minor — fast enough |
+| `parse_document()` | `docs_parser.py` | **I/O+CPU** (PyMuPDF) | None | Wrap in executor for large docs |
+
+## 8.2 Async Architecture After Migration
+
+```mermaid
+flowchart TD
+    subgraph "Event Loop (Single Thread)"
+        A[FastAPI ASGI Handler]
+        B[WebSocket Events]
+        C[LangGraph Workflow Nodes]
+        D[Playwright Operations]
+        E[Supabase Async Client]
+    end
+    
+    subgraph "Thread Pool (run_in_executor)"
+        F[LLM API Calls]
+        G[SentenceTransformer.encode]
+        H[Pinecone Queries]
+        I[File I/O]
+    end
+    
+    A --> C
+    C --> D
+    C --> F
+    C --> G
+    C --> H
+    D -->|await| A
+    F -->|await| C
+    B -->|emit| A
+    
+    style D fill:#00b894,color:#fff
+    style F fill:#fdcb6e,color:#333
+    style G fill:#fdcb6e,color:#333
+```
+
+> [!IMPORTANT]
+> **Green** = native async (no thread needed). **Yellow** = still requires thread pool. The key win is that Playwright operations (browser launch, navigation, clicking, screenshots) move from thread pool to event loop.
+
+## 8.3 Concurrent Browser Sessions
+
+```python
+# backend/services/concurrent_executor.py
+import asyncio
+from typing import List, Dict
+from backend.automation.driver_factory import DriverFactory
+from backend.automation.base_driver import BrowserConfig, ExecutionResult
+
+async def execute_tests_concurrently(
+    scripts: List[Dict],
+    max_concurrent: int = 3,
+    engine: str = "playwright"
+) -> List[ExecutionResult]:
+    """
+    Execute multiple tests concurrently using semaphore-bounded parallelism.
+    """
+    semaphore = asyncio.Semaphore(max_concurrent)
+    results = []
+
+    async def run_single(script: Dict) -> ExecutionResult:
+        async with semaphore:
+            test_id = script["test_id"]
+            config = BrowserConfig(
+                record_video=True,
+                video_dir=f"test_results/{test_id}/videos"
+            )
+            driver = await DriverFactory.create(engine=engine, config=config)
+            try:
+                ctx = await driver.create_context(config)
+                # Execute script steps...
+                artifacts = await ctx.close()
+                return ExecutionResult(
+                    status="passed", logs="", duration=0.0,
+                    video_path=artifacts.get("video_path")
+                )
+            except Exception as e:
+                return ExecutionResult(
+                    status="failed", logs=str(e), duration=0.0,
+                    error_message=str(e)
+                )
+            finally:
+                await driver.shutdown()
+
+    tasks = [run_single(s) for s in scripts]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    return [
+        r if isinstance(r, ExecutionResult)
+        else ExecutionResult(status="error", logs=str(r), duration=0.0, error_message=str(r))
+        for r in results
+    ]
+```
+
+## 8.4 Task Queue Architecture (Future Enhancement)
+
+For production scale beyond single-server:
+
+```mermaid
+graph TD
+    subgraph "API Server"
+        A[FastAPI] --> B[Redis Queue]
+    end
+    
+    subgraph "Worker Pool"
+        B --> W1[Worker 1 - Playwright]
+        B --> W2[Worker 2 - Playwright]
+        B --> W3[Worker 3 - Playwright]
+    end
+    
+    subgraph "Results"
+        W1 & W2 & W3 --> R[Redis Results Store]
+        R --> A
+        W1 & W2 & W3 --> S3[S3/MinIO Artifacts]
+    end
+    
+    subgraph "Monitoring"
+        W1 & W2 & W3 --> M[Prometheus Metrics]
+    end
+```
+
+**Recommended stack** (when needed):
+- **Queue**: Redis + `arq` (async-native Python task queue)
+- **Workers**: Separate processes, each with its own Playwright browser pool
+- **Artifacts**: S3-compatible storage for screenshots/videos/traces
+- **Monitoring**: Prometheus + Grafana for execution metrics
+
+> [!NOTE]
+> This is a **future enhancement**. The immediate migration should focus on in-process async execution, which handles 10-20 concurrent tests on a single 8GB server.
+
+---
+
+## 9.1 Docker Strategy
+
+### Current Problems
+1. ChromeDriver version must match installed Chrome exactly
+2. `webdriver-manager` downloads binaries at runtime (fails in air-gapped environments)
+3. No official Selenium Python Docker image with browser included
+4. OpenCV native dependencies are heavy
+
+### Playwright Docker Solution
+
+```dockerfile
+# Dockerfile.playwright
+FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Playwright browsers (already included in base image, 
+# but this ensures version match with pip package)
+RUN playwright install --with-deps chromium
+
+# Copy application
+COPY . .
+
+# Expose ports
+EXPOSE 8001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD curl -f http://localhost:8001/api/health || exit 1
+
+# Run
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8001"]
+```
+
+### Docker Compose
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+
+services:
+  qa-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.playwright
+    ports:
+      - "8001:8001"
+    environment:
+      - BROWSER_ENGINE=playwright
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - PINECONE_API_KEY=${PINECONE_API_KEY}
+      - PINECONE_INDEX_NAME=${PINECONE_INDEX_NAME}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - LLM_PROVIDER=groq
+    volumes:
+      - test-results:/app/test_results
+      - project-data:/app/backend/data/projects
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
+    restart: unless-stopped
+
+  # Optional: Redis for task queue (future)
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
+
+volumes:
+  test-results:
+  project-data:
+```
+
+### Why Playwright Containers Are Easier
+
+| Concern | Selenium Docker | Playwright Docker |
+|---------|----------------|-------------------|
+| **Base image** | Custom: install Chrome + ChromeDriver + match versions | Official: `mcr.microsoft.com/playwright/python` |
+| **Browser install** | Manual apt-get + version pinning | `playwright install --with-deps` |
+| **Version sync** | Must manually match Chrome ↔ ChromeDriver | Auto-synced by Playwright package version |
+| **Image freshness** | Manual updates, version drift | Microsoft maintains official images |
+| **Sandbox issues** | `--no-sandbox` + `--disable-dev-shm-usage` flags needed | Same flags, but better documented |
+| **Multi-browser** | Separate images for Firefox, Edge | Single image supports Chromium, Firefox, WebKit |
+| **Size** | ~1.2GB | ~1.4GB (includes all browsers) or ~900MB (Chromium only) |
+| **ARM support** | Limited | Full ARM64 support |
+
+## 9.2 Kubernetes Architecture
+
+```yaml
+# k8s/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qa-agent
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: qa-agent
+  template:
+    metadata:
+      labels:
+        app: qa-agent
+    spec:
+      containers:
+        - name: qa-agent
+          image: qa-agent:latest
+          ports:
+            - containerPort: 8001
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1"
+            limits:
+              memory: "4Gi"
+              cpu: "2"
+          env:
+            - name: BROWSER_ENGINE
+              value: "playwright"
+            - name: BROWSER_POOL_MAX
+              value: "3"
+          volumeMounts:
+            - name: test-results
+              mountPath: /app/test_results
+            - name: shm
+              mountPath: /dev/shm
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8001
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8001
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: test-results
+          persistentVolumeClaim:
+            claimName: test-results-pvc
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+```
+
+## 9.3 Blue-Green Migration Strategy
+
+```mermaid
+flowchart LR
+    subgraph "Phase 1: Green (Current)"
+        G1[Selenium Engine] --> G2[Production Traffic 100%]
+    end
+    
+    subgraph "Phase 2: Canary"
+        B1[Playwright Engine] --> B2[10% Traffic]
+        G1 --> G3[90% Traffic]
+    end
+    
+    subgraph "Phase 3: Split"
+        B1b[Playwright Engine] --> B3[50% Traffic]
+        G1b[Selenium Engine] --> G4[50% Traffic]
+    end
+    
+    subgraph "Phase 4: Blue (Target)"
+        B1c[Playwright Engine] --> B4[100% Traffic]
+        G1c[Selenium Standby] --> G5[0% - Rollback Ready]
+    end
+```
+
+**Feature flag implementation**:
+```python
+# backend/core/config.py
+class Settings:
+    # ... existing settings ...
+    BROWSER_ENGINE = os.getenv("BROWSER_ENGINE", "selenium")  # "selenium" | "playwright" | "auto"
+    PLAYWRIGHT_ROLLOUT_PERCENT = int(os.getenv("PLAYWRIGHT_ROLLOUT_PERCENT", "0"))
+```
+
+## 9.4 CI/CD Flow
+
+```mermaid
+flowchart TD
+    A[Push to main] --> B[Build Docker Image]
+    B --> C[Install Playwright Browsers]
+    C --> D[Run Unit Tests]
+    D --> E[Run Integration Tests with Playwright]
+    E --> F{Tests Pass?}
+    F -->|Yes| G[Push to Registry]
+    F -->|No| H[Block Deployment]
+    G --> I[Deploy to Staging]
+    I --> J[Smoke Tests]
+    J --> K{Smoke Pass?}
+    K -->|Yes| L[Deploy to Production]
+    K -->|No| M[Rollback]
+```
+
+```yaml
+# .github/workflows/ci.yml (key section)
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright/python:v1.49.0-noble
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install -r requirements.txt
+      - run: playwright install --with-deps chromium
+      - run: python -m pytest tests/ -v
+      - run: python -m pytest tests/integration/ -v --browser chromium
+```

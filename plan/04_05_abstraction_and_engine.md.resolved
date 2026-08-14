@@ -1,0 +1,782 @@
+# Selenium → Playwright Migration Blueprint — Parts 4 & 5
+# ABSTRACTION LAYER + PLAYWRIGHT EXECUTION ENGINE
+
+---
+
+## 4.1 Automation Abstraction Layer — Interface Design
+
+### BaseDriver (Abstract Base Class)
+
+```python
+# backend/automation/base_driver.py
+from abc import ABC, abstractmethod
+from typing import Optional, Dict, Any
+from dataclasses import dataclass
+
+@dataclass
+class BrowserConfig:
+    """Engine-agnostic browser configuration."""
+    headless: bool = True
+    browser_type: str = "chromium"  # chromium, firefox, webkit
+    viewport_width: int = 1280
+    viewport_height: int = 720
+    timeout_ms: int = 30000
+    record_video: bool = False
+    record_trace: bool = False
+    video_dir: Optional[str] = None
+    trace_dir: Optional[str] = None
+    extra_args: list = None
+
+    def __post_init__(self):
+        if self.extra_args is None:
+            self.extra_args = []
+
+@dataclass
+class ExecutionResult:
+    """Engine-agnostic execution result."""
+    status: str           # passed, failed, error, timeout
+    logs: str
+    duration: float
+    error_message: Optional[str] = None
+    screenshot_path: Optional[str] = None
+    video_path: Optional[str] = None
+    trace_path: Optional[str] = None
+    browser: Optional[str] = None
+    browser_version: Optional[str] = None
+    os_info: Optional[str] = None
+
+class BaseDriver(ABC):
+    """
+    Abstract browser driver interface.
+    All browser engines must implement this contract.
+    
+    Lifecycle:
+        driver = await DriverFactory.create("playwright")
+        await driver.launch(config)
+        ctx = await driver.create_context(config)
+        # ... use ctx ...
+        await ctx.close()
+        await driver.shutdown()
+    """
+
+    @property
+    @abstractmethod
+    def engine_name(self) -> str:
+        """Return engine identifier: 'playwright' or 'selenium'."""
+        ...
+
+    @abstractmethod
+    async def launch(self, config: BrowserConfig) -> None:
+        """Launch browser instance."""
+        ...
+
+    @abstractmethod
+    async def create_context(self, config: BrowserConfig) -> 'BaseExecutionContext':
+        """Create isolated execution context with optional recording."""
+        ...
+
+    @abstractmethod
+    async def get_browser_info(self) -> Dict[str, str]:
+        """Return browser name, version, and platform info."""
+        ...
+
+    @abstractmethod
+    async def shutdown(self) -> None:
+        """Close browser and release all resources."""
+        ...
+
+    @abstractmethod
+    async def is_healthy(self) -> bool:
+        """Health check — is browser responsive?"""
+        ...
+
+
+class BaseExecutionContext(ABC):
+    """
+    Abstract execution context — represents an isolated browser session.
+    Wraps Playwright BrowserContext or Selenium WebDriver instance.
+    """
+
+    @abstractmethod
+    async def navigate(self, url: str, wait_until: str = "load") -> None:
+        ...
+
+    @abstractmethod
+    async def fill(self, selector: str, value: str) -> None:
+        ...
+
+    @abstractmethod
+    async def click(self, selector: str) -> None:
+        ...
+
+    @abstractmethod
+    async def get_text(self, selector: str) -> str:
+        ...
+
+    @abstractmethod
+    async def wait_for_selector(self, selector: str, state: str = "visible",
+                                 timeout_ms: int = 10000) -> None:
+        ...
+
+    @abstractmethod
+    async def screenshot(self, path: str, full_page: bool = False) -> str:
+        ...
+
+    @abstractmethod
+    async def evaluate(self, expression: str) -> Any:
+        """Execute JavaScript in page context."""
+        ...
+
+    @abstractmethod
+    async def close(self) -> Dict[str, Optional[str]]:
+        """
+        Close context and return artifact paths.
+        Returns: {"video_path": ..., "trace_path": ...}
+        """
+        ...
+```
+
+### DriverFactory
+
+```python
+# backend/automation/driver_factory.py
+from backend.automation.base_driver import BaseDriver, BrowserConfig
+import os
+
+class DriverFactory:
+    """
+    Factory for creating browser driver instances.
+    Supports runtime engine selection via config or environment variable.
+    """
+
+    _registry: dict = {}
+
+    @classmethod
+    def register(cls, engine_name: str, driver_class: type):
+        """Register a driver implementation."""
+        cls._registry[engine_name] = driver_class
+
+    @classmethod
+    async def create(cls, engine: str = None, config: BrowserConfig = None) -> BaseDriver:
+        """
+        Create and launch a browser driver.
+        
+        Args:
+            engine: 'playwright' or 'selenium'. Defaults to env BROWSER_ENGINE.
+            config: Browser configuration. Uses defaults if not provided.
+        """
+        if engine is None:
+            engine = os.getenv("BROWSER_ENGINE", "playwright")
+
+        if config is None:
+            config = BrowserConfig()
+
+        driver_class = cls._registry.get(engine)
+        if not driver_class:
+            available = list(cls._registry.keys())
+            raise ValueError(f"Unknown engine '{engine}'. Available: {available}")
+
+        driver = driver_class()
+        await driver.launch(config)
+        return driver
+
+    @classmethod
+    def get_default_engine(cls) -> str:
+        return os.getenv("BROWSER_ENGINE", "playwright")
+
+
+# Auto-registration at import time
+def _register_drivers():
+    try:
+        from backend.automation.playwright_driver import PlaywrightDriver
+        DriverFactory.register("playwright", PlaywrightDriver)
+    except ImportError:
+        pass
+
+    try:
+        from backend.automation.selenium_driver import SeleniumDriver
+        DriverFactory.register("selenium", SeleniumDriver)
+    except ImportError:
+        pass
+
+_register_drivers()
+```
+
+### PlaywrightDriver Implementation
+
+```python
+# backend/automation/playwright_driver.py
+import asyncio
+import platform
+from typing import Dict, Optional, Any
+from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
+from backend.automation.base_driver import (
+    BaseDriver, BaseExecutionContext, BrowserConfig, ExecutionResult
+)
+
+class PlaywrightDriver(BaseDriver):
+    """Playwright implementation of the BaseDriver interface."""
+
+    def __init__(self):
+        self._playwright: Optional[Playwright] = None
+        self._browser: Optional[Browser] = None
+        self._config: Optional[BrowserConfig] = None
+
+    @property
+    def engine_name(self) -> str:
+        return "playwright"
+
+    async def launch(self, config: BrowserConfig) -> None:
+        self._config = config
+        self._playwright = await async_playwright().start()
+
+        launcher = getattr(self._playwright, config.browser_type, self._playwright.chromium)
+
+        launch_args = [
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            *config.extra_args
+        ]
+
+        self._browser = await launcher.launch(
+            headless=config.headless,
+            args=launch_args
+        )
+
+    async def create_context(self, config: BrowserConfig = None) -> 'PlaywrightExecutionContext':
+        cfg = config or self._config
+        if not self._browser:
+            raise RuntimeError("Browser not launched. Call launch() first.")
+
+        context_options = {
+            "viewport": {"width": cfg.viewport_width, "height": cfg.viewport_height},
+        }
+
+        if cfg.record_video and cfg.video_dir:
+            context_options["record_video_dir"] = cfg.video_dir
+            context_options["record_video_size"] = {
+                "width": cfg.viewport_width,
+                "height": cfg.viewport_height
+            }
+
+        context = await self._browser.new_context(**context_options)
+
+        if cfg.record_trace and cfg.trace_dir:
+            await context.tracing.start(screenshots=True, snapshots=True, sources=True)
+
+        page = await context.new_page()
+        page.set_default_timeout(cfg.timeout_ms)
+
+        return PlaywrightExecutionContext(
+            context=context, page=page, config=cfg
+        )
+
+    async def get_browser_info(self) -> Dict[str, str]:
+        if not self._browser:
+            return {"browser": "unknown", "version": "unknown", "os": "unknown"}
+
+        return {
+            "browser": self._browser.browser_type.name,
+            "version": self._browser.version,
+            "os": f"{platform.system()} {platform.version()}"
+        }
+
+    async def shutdown(self) -> None:
+        if self._browser:
+            await self._browser.close()
+            self._browser = None
+        if self._playwright:
+            await self._playwright.stop()
+            self._playwright = None
+
+    async def is_healthy(self) -> bool:
+        if not self._browser or not self._browser.is_connected():
+            return False
+        try:
+            ctx = await self._browser.new_context()
+            page = await ctx.new_page()
+            await page.goto("about:blank")
+            await ctx.close()
+            return True
+        except Exception:
+            return False
+
+
+class PlaywrightExecutionContext(BaseExecutionContext):
+    """Playwright BrowserContext wrapper implementing BaseExecutionContext."""
+
+    def __init__(self, context: BrowserContext, page: Page, config: BrowserConfig):
+        self._context = context
+        self._page = page
+        self._config = config
+        self._closed = False
+
+        # Register dialog handler (replaces Selenium alert handling)
+        self._page.on("dialog", lambda dialog: asyncio.ensure_future(dialog.accept()))
+
+    async def navigate(self, url: str, wait_until: str = "load") -> None:
+        await self._page.goto(url, wait_until=wait_until)
+
+    async def fill(self, selector: str, value: str) -> None:
+        await self._page.fill(selector, value)
+
+    async def click(self, selector: str) -> None:
+        await self._page.click(selector)
+
+    async def get_text(self, selector: str) -> str:
+        return await self._page.text_content(selector) or ""
+
+    async def wait_for_selector(self, selector: str, state: str = "visible",
+                                 timeout_ms: int = 10000) -> None:
+        await self._page.wait_for_selector(selector, state=state, timeout=timeout_ms)
+
+    async def screenshot(self, path: str, full_page: bool = False) -> str:
+        await self._page.screenshot(path=path, full_page=full_page)
+        return path
+
+    async def evaluate(self, expression: str) -> Any:
+        return await self._page.evaluate(expression)
+
+    async def close(self) -> Dict[str, Optional[str]]:
+        if self._closed:
+            return {}
+
+        artifacts = {"video_path": None, "trace_path": None}
+
+        # Save trace if recording
+        if self._config.record_trace and self._config.trace_dir:
+            import os
+            trace_path = os.path.join(self._config.trace_dir, "trace.zip")
+            await self._context.tracing.stop(path=trace_path)
+            artifacts["trace_path"] = trace_path
+
+        # Close context (this finalizes video recording)
+        await self._context.close()
+
+        # Get video path after close
+        if self._config.record_video:
+            try:
+                video = self._page.video
+                if video:
+                    artifacts["video_path"] = await video.path()
+            except Exception:
+                pass
+
+        self._closed = True
+        return artifacts
+```
+
+### SeleniumDriver (Legacy Wrapper)
+
+```python
+# backend/automation/selenium_driver.py
+import asyncio
+import platform
+from typing import Dict, Optional, Any
+from backend.automation.base_driver import (
+    BaseDriver, BaseExecutionContext, BrowserConfig
+)
+
+class SeleniumDriver(BaseDriver):
+    """Legacy Selenium wrapper implementing BaseDriver for backward compatibility."""
+
+    def __init__(self):
+        self._driver = None
+
+    @property
+    def engine_name(self) -> str:
+        return "selenium"
+
+    async def launch(self, config: BrowserConfig) -> None:
+        def _launch_sync():
+            from selenium import webdriver
+            from selenium.webdriver.chrome.service import Service
+            from webdriver_manager.chrome import ChromeDriverManager
+
+            options = webdriver.ChromeOptions()
+            if config.headless:
+                options.add_argument("--headless=new")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            for arg in config.extra_args:
+                options.add_argument(arg)
+
+            self._driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()),
+                options=options
+            )
+
+        await asyncio.to_thread(_launch_sync)
+
+    async def create_context(self, config: BrowserConfig = None) -> 'SeleniumExecutionContext':
+        # Selenium doesn't have true context isolation
+        return SeleniumExecutionContext(self._driver)
+
+    async def get_browser_info(self) -> Dict[str, str]:
+        if not self._driver:
+            return {"browser": "unknown", "version": "unknown", "os": "unknown"}
+        caps = self._driver.capabilities
+        return {
+            "browser": caps.get("browserName", "unknown"),
+            "version": caps.get("browserVersion", "unknown"),
+            "os": f"{platform.system()} {platform.version()}"
+        }
+
+    async def shutdown(self) -> None:
+        if self._driver:
+            await asyncio.to_thread(self._driver.quit)
+            self._driver = None
+
+    async def is_healthy(self) -> bool:
+        try:
+            await asyncio.to_thread(self._driver.title.__class__)
+            return True
+        except Exception:
+            return False
+
+
+class SeleniumExecutionContext(BaseExecutionContext):
+    """Selenium WebDriver wrapper implementing BaseExecutionContext."""
+
+    def __init__(self, driver):
+        self._driver = driver
+
+    async def navigate(self, url: str, wait_until: str = "load") -> None:
+        await asyncio.to_thread(self._driver.get, url)
+
+    async def fill(self, selector: str, value: str) -> None:
+        from selenium.webdriver.common.by import By
+        def _fill():
+            el = self._driver.find_element(By.CSS_SELECTOR, selector)
+            el.clear()
+            el.send_keys(value)
+        await asyncio.to_thread(_fill)
+
+    async def click(self, selector: str) -> None:
+        from selenium.webdriver.common.by import By
+        def _click():
+            self._driver.find_element(By.CSS_SELECTOR, selector).click()
+        await asyncio.to_thread(_click)
+
+    async def get_text(self, selector: str) -> str:
+        from selenium.webdriver.common.by import By
+        def _get():
+            return self._driver.find_element(By.CSS_SELECTOR, selector).text
+        return await asyncio.to_thread(_get)
+
+    async def wait_for_selector(self, selector: str, state: str = "visible",
+                                 timeout_ms: int = 10000) -> None:
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        def _wait():
+            WebDriverWait(self._driver, timeout_ms / 1000).until(
+                EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
+            )
+        await asyncio.to_thread(_wait)
+
+    async def screenshot(self, path: str, full_page: bool = False) -> str:
+        await asyncio.to_thread(self._driver.save_screenshot, path)
+        return path
+
+    async def evaluate(self, expression: str) -> Any:
+        return await asyncio.to_thread(self._driver.execute_script, expression)
+
+    async def close(self) -> Dict[str, Optional[str]]:
+        # Selenium doesn't have context-level close; driver.quit() in shutdown
+        return {}
+```
+
+---
+
+## 5.1 Playwright Execution Engine — Browser Pool
+
+```python
+# backend/automation/browser_pool.py
+import asyncio
+import time
+from typing import Dict, Optional
+from dataclasses import dataclass, field
+from playwright.async_api import async_playwright, Browser, Playwright
+
+@dataclass
+class BrowserSlot:
+    browser: Browser
+    browser_id: str
+    context_count: int = 0
+    created_at: float = field(default_factory=time.time)
+    last_used: float = field(default_factory=time.time)
+
+class BrowserPoolManager:
+    """
+    Production-grade browser pool for Playwright.
+    
+    Features:
+    - Configurable max concurrent browsers
+    - Automatic recycling after N contexts
+    - Idle timeout cleanup
+    - Health monitoring
+    - Graceful shutdown
+    """
+
+    def __init__(
+        self,
+        max_browsers: int = 3,
+        max_contexts_per_browser: int = 20,
+        idle_timeout_seconds: int = 300,
+        browser_type: str = "chromium",
+        headless: bool = True,
+    ):
+        self._max_browsers = max_browsers
+        self._max_contexts = max_contexts_per_browser
+        self._idle_timeout = idle_timeout_seconds
+        self._browser_type = browser_type
+        self._headless = headless
+
+        self._slots: Dict[str, BrowserSlot] = {}
+        self._semaphore = asyncio.Semaphore(max_browsers)
+        self._playwright: Optional[Playwright] = None
+        self._lock = asyncio.Lock()
+        self._cleanup_task: Optional[asyncio.Task] = None
+        self._counter = 0
+
+    async def start(self):
+        """Initialize Playwright and start cleanup loop."""
+        self._playwright = await async_playwright().start()
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+
+    async def acquire(self) -> tuple[str, Browser]:
+        """Acquire a browser from the pool. Blocks if pool is full."""
+        await self._semaphore.acquire()
+
+        async with self._lock:
+            # Find reusable slot
+            for slot_id, slot in self._slots.items():
+                if slot.context_count < self._max_contexts and slot.browser.is_connected():
+                    slot.context_count += 1
+                    slot.last_used = time.time()
+                    return slot_id, slot.browser
+
+            # Launch new browser
+            return await self._launch_new()
+
+    async def release(self, browser_id: str):
+        """Release browser back to pool."""
+        self._semaphore.release()
+        async with self._lock:
+            slot = self._slots.get(browser_id)
+            if slot and slot.context_count >= self._max_contexts:
+                await self._recycle(browser_id)
+
+    async def _launch_new(self) -> tuple[str, Browser]:
+        launcher = getattr(self._playwright, self._browser_type)
+        browser = await launcher.launch(
+            headless=self._headless,
+            args=["--disable-dev-shm-usage", "--disable-gpu", "--no-sandbox"]
+        )
+        self._counter += 1
+        browser_id = f"browser-{self._counter}"
+        self._slots[browser_id] = BrowserSlot(
+            browser=browser, browser_id=browser_id, context_count=1
+        )
+        return browser_id, browser
+
+    async def _recycle(self, browser_id: str):
+        slot = self._slots.pop(browser_id, None)
+        if slot and slot.browser.is_connected():
+            await slot.browser.close()
+
+    async def _cleanup_loop(self):
+        """Periodically close idle browsers."""
+        while True:
+            await asyncio.sleep(60)
+            async with self._lock:
+                now = time.time()
+                idle_ids = [
+                    bid for bid, slot in self._slots.items()
+                    if now - slot.last_used > self._idle_timeout
+                ]
+                for bid in idle_ids:
+                    await self._recycle(bid)
+
+    async def shutdown(self):
+        """Gracefully close all browsers."""
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+        async with self._lock:
+            for slot in list(self._slots.values()):
+                if slot.browser.is_connected():
+                    await slot.browser.close()
+            self._slots.clear()
+        if self._playwright:
+            await self._playwright.stop()
+```
+
+## 5.2 ArtifactManager
+
+```python
+# backend/automation/artifact_manager.py
+import os
+import time
+from typing import Optional, Dict
+
+class ArtifactManager:
+    """Manages test execution artifacts: screenshots, videos, traces."""
+
+    BASE_DIR = "test_results"
+
+    @staticmethod
+    def get_artifact_dir(test_id: str, artifact_type: str = "") -> str:
+        path = os.path.join(ArtifactManager.BASE_DIR, test_id, artifact_type)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    @staticmethod
+    async def save_screenshot(page, test_id: str, suffix: str = "failure") -> Optional[str]:
+        try:
+            dir_path = ArtifactManager.get_artifact_dir(test_id, "screenshots")
+            timestamp = int(time.time())
+            filepath = os.path.join(dir_path, f"{suffix}_{timestamp}.png")
+            await page.screenshot(path=filepath, full_page=True)
+            return filepath
+        except Exception as e:
+            print(f"[ARTIFACT] Screenshot failed: {e}")
+            return None
+
+    @staticmethod
+    def get_video_dir(test_id: str) -> str:
+        return ArtifactManager.get_artifact_dir(test_id, "videos")
+
+    @staticmethod
+    def get_trace_dir(test_id: str) -> str:
+        return ArtifactManager.get_artifact_dir(test_id, "traces")
+
+    @staticmethod
+    def cleanup_old_artifacts(max_age_days: int = 7):
+        """Remove artifacts older than max_age_days."""
+        import shutil
+        cutoff = time.time() - (max_age_days * 86400)
+        if not os.path.exists(ArtifactManager.BASE_DIR):
+            return
+        for test_dir in os.listdir(ArtifactManager.BASE_DIR):
+            full_path = os.path.join(ArtifactManager.BASE_DIR, test_dir)
+            if os.path.isdir(full_path) and os.path.getmtime(full_path) < cutoff:
+                shutil.rmtree(full_path, ignore_errors=True)
+```
+
+## 5.3 Modified Execution Service (Engine-Agnostic)
+
+```python
+# backend/services/execution_service.py (REFACTORED)
+import time
+import asyncio
+from typing import Optional
+from backend.automation.base_driver import ExecutionResult, BrowserConfig
+from backend.automation.driver_factory import DriverFactory
+from backend.automation.artifact_manager import ArtifactManager
+
+async def execute_test_with_driver(
+    script_content: str,
+    test_id: str,
+    engine: str = None,
+    config: BrowserConfig = None
+) -> ExecutionResult:
+    """
+    Execute a test using the abstraction layer.
+    
+    For AI-generated scripts that use raw Playwright/Selenium API directly
+    (subprocess model), use execute_test_script() instead.
+    
+    For structured test steps (future), use this function.
+    """
+    start_time = time.time()
+    driver = None
+
+    try:
+        config = config or BrowserConfig(
+            record_video=True,
+            record_trace=True,
+            video_dir=ArtifactManager.get_video_dir(test_id),
+            trace_dir=ArtifactManager.get_trace_dir(test_id)
+        )
+
+        driver = await DriverFactory.create(engine=engine, config=config)
+        ctx = await driver.create_context(config)
+        browser_info = await driver.get_browser_info()
+
+        # Execute the script content
+        # This would require a safe execution sandbox
+        # For now, we still use subprocess for AI-generated scripts
+        
+        duration = time.time() - start_time
+        artifacts = await ctx.close()
+
+        return ExecutionResult(
+            status="passed",
+            logs="",
+            duration=duration,
+            video_path=artifacts.get("video_path"),
+            trace_path=artifacts.get("trace_path"),
+            browser=browser_info.get("browser"),
+            browser_version=browser_info.get("version"),
+            os_info=browser_info.get("os")
+        )
+
+    except Exception as e:
+        duration = time.time() - start_time
+        return ExecutionResult(
+            status="failed",
+            logs=str(e),
+            duration=duration,
+            error_message=str(e)
+        )
+
+    finally:
+        if driver:
+            await driver.shutdown()
+```
+
+## 5.4 Execution Flow Diagram
+
+```mermaid
+sequenceDiagram
+    participant WF as LangGraph Workflow
+    participant ES as ExecutionService
+    participant DF as DriverFactory
+    participant PD as PlaywrightDriver
+    participant BP as BrowserPool
+    participant CTX as ExecutionContext
+    participant AM as ArtifactManager
+    participant DB as Supabase
+
+    WF->>ES: execute_test_script(content, test_id)
+    ES->>DF: create(engine="playwright")
+    DF->>PD: PlaywrightDriver()
+    PD->>BP: acquire()
+    BP-->>PD: (browser_id, browser)
+    PD-->>ES: driver
+
+    ES->>AM: get_video_dir(test_id)
+    AM-->>ES: path
+    ES->>PD: create_context(config)
+    PD->>CTX: new BrowserContext + Page
+
+    ES->>CTX: navigate(url)
+    ES->>CTX: fill(selector, value)
+    ES->>CTX: click(selector)
+
+    alt Success
+        ES->>CTX: screenshot(path)
+        ES->>CTX: close()
+        CTX-->>ES: {video_path, trace_path}
+    else Failure
+        ES->>AM: save_screenshot(page, test_id)
+        ES->>CTX: close()
+        CTX-->>ES: {video_path, trace_path}
+    end
+
+    ES->>PD: release browser to pool
+    PD->>BP: release(browser_id)
+    ES-->>WF: ExecutionResult
+    WF->>DB: Update test_executions
+```

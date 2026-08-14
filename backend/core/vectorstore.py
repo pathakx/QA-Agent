@@ -2,12 +2,8 @@ import os
 import time
 from backend.core.models import Chunk
 from backend.core.config import settings
-from sentence_transformers import SentenceTransformer
 from pinecone import Pinecone
-from transformers import logging as transformers_logging
-
-# Suppress warnings from transformers (like "position_ids unexpected")
-transformers_logging.set_verbosity_error()
+import requests
 
 class VectorStore:
     def __init__(self, collection_name: str = "qa_collection"):
@@ -34,11 +30,26 @@ class VectorStore:
         print(f"Connecting to Pinecone index: {self.index_name}")
         self.index = self.pc.Index(self.index_name)
         
-        # Initialize Embedding Model
-        # This matches the dimension of the index (384)
-        print("Loading embedding model: sentence-transformers/all-MiniLM-L6-v2...")
-        self.model = SentenceTransformer('all-MiniLM-L6-v2') 
-        print("Embedding model loaded.")
+        # Use HuggingFace Inference API to save memory on Render
+        self.hf_api_url = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
+        print("Using HuggingFace API for embeddings (0MB RAM footprint).")
+        
+    def _get_embeddings(self, texts: list[str]) -> list[list[float]]:
+        """Fetch embeddings from HuggingFace API"""
+        try:
+            response = requests.post(
+                self.hf_api_url, 
+                json={"inputs": texts, "options": {"wait_for_model": True}}
+            )
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"HF API Error: {response.text}")
+                # Fallback zero-vectors if API fails
+                return [[0.0] * 384 for _ in texts]
+        except Exception as e:
+            print(f"HF API Exception: {e}")
+            return [[0.0] * 384 for _ in texts]
 
     def add_chunks(self, chunks: list[Chunk]):
         if not chunks:
@@ -47,9 +58,9 @@ class VectorStore:
             
         print(f"Processing {len(chunks)} chunks for Pinecone...")
         
-        # Generate embeddings
+        # Generate embeddings via API
         texts = [c.text for c in chunks]
-        embeddings = self.model.encode(texts)
+        embeddings = self._get_embeddings(texts)
         
         vectors = []
         for i, chunk in enumerate(chunks):
@@ -62,7 +73,7 @@ class VectorStore:
             # Pinecone expects 'values' as the embedding vector
             vectors.append({
                 "id": chunk.id,
-                "values": embeddings[i].tolist(),
+                "values": embeddings[i],
                 "metadata": metadata
             })
         
@@ -96,8 +107,8 @@ class VectorStore:
                 print("Warning: Index is empty, returning no results")
                 return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
 
-            # Generate query embedding
-            query_vector = self.model.encode(query).tolist()
+            # Generate query embedding via API
+            query_vector = self._get_embeddings([query])[0]
             
             # Query Pinecone
             results = self.index.query(

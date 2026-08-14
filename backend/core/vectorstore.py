@@ -37,8 +37,14 @@ class VectorStore:
     def _get_embeddings(self, texts: list[str]) -> list[list[float]]:
         """Fetch embeddings from HuggingFace API"""
         try:
+            headers = {}
+            hf_token = os.getenv("HF_TOKEN")
+            if hf_token:
+                headers["Authorization"] = f"Bearer {hf_token}"
+                
             response = requests.post(
                 self.hf_api_url, 
+                headers=headers,
                 json={"inputs": texts, "options": {"wait_for_model": True}}
             )
             if response.status_code == 200:

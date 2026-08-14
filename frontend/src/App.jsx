@@ -49,7 +49,7 @@ const Sidebar = ({ activeTab, setActiveTab }) => {
   const tabs = [
     { id: 'kb', label: 'Knowledge Base', icon: Database },
     { id: 'tests', label: 'Test Generator', icon: TestTube },
-    { id: 'scripts', label: 'Selenium Scripts', icon: Code },
+    { id: 'scripts', label: 'Playwright Scripts', icon: Code },
     { id: 'suites', label: 'Test Suites', icon: Folder }, // New items
     { id: 'autonomous', label: 'Autonomous Agent', icon: Cpu },
     { id: 'results', label: 'Test Results', icon: Activity },
@@ -596,7 +596,7 @@ const ScriptGenerator = ({ availableTests }) => {
     setLoading(true);
     setScript("");
     try {
-      const res = await api.post('/agent/selenium-script', { testcase: selectedTest });
+      const res = await api.post('/agent/playwright-script', { testcase: selectedTest });
       setScript(res.data.script);
     } catch (err) {
       alert('Script generation failed: ' + err.message);
@@ -623,9 +623,8 @@ const ScriptGenerator = ({ availableTests }) => {
       }
 
       try {
-        // Correct endpoint should be /agent/selenium-scripts/{test_id}
-        // Use encodeURIComponent to handle special characters in test_id
-        const res = await api.get(`/agent/selenium-scripts/${encodeURIComponent(selectedTest.test_id)}`);
+        // Correct endpoint should be /agent/playwright-scripts/{test_id}
+        const res = await api.get(`/agent/playwright-scripts/${encodeURIComponent(selectedTest.test_id)}`);
         if (active) {
           if (res.data.script && res.data.script.script_content) {
             setScript(res.data.script.script_content);
@@ -663,7 +662,7 @@ const ScriptGenerator = ({ availableTests }) => {
       animate={{ opacity: 1 }}
       className="p-8 h-full flex flex-col space-y-6"
     >
-      <h2 className="text-3xl font-bold">Selenium Script Generator</h2>
+      <h2 className="text-3xl font-bold">Playwright Script Generator</h2>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full min-h-0 pb-20">
         {/* Left: Test Selection */}

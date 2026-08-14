@@ -3,7 +3,7 @@ uvicorn[standard]
 python-multipart
 pymupdf
 beautifulsoup4
-sentence-transformers
+
 pydantic
 python-dotenv
 openai
@@ -16,8 +16,6 @@ aiofiles
 # opencv-python causes build failure on headless servers (no display)
 opencv-python-headless
 apscheduler
-chromadb
 pinecone
-transformers
 playwright
 requests

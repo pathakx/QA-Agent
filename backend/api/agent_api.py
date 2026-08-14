@@ -2,10 +2,11 @@
 Agent API with project isolation
 All test case and script generation operations are scoped to the current project
 """
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from backend.services.project_testcase_service import generate_testcases_for_project
-from backend.services.selenium_service import generate_selenium_script
+from backend.automation.script_gen import generate_script as generate_automation_script
 from backend.auth.project_helpers import get_current_project, get_project_vector_store
 from backend.auth.dependencies import get_current_user
 from backend.core.supabase_client import create_user_client
@@ -134,12 +135,14 @@ def delete_testcase(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/selenium-script")
+@router.post("/automation-script")
+@router.post("/playwright-script")
 def create_script(
     req: ScriptRequest,
     project: dict = Depends(get_current_project),
     current_user = Depends(get_current_user)
 ):
-    """Generate Selenium script for a test case"""
+    """Generate an automation script (Playwright or Selenium) for a test case"""
     try:
         # Determine HTML path for project
         paths = get_project_paths(project)
@@ -152,7 +155,13 @@ def create_script(
                 html_path = os.path.abspath(html_files[0])
                 print(f"Using project HTML file: {html_path}")
         
-        script = generate_selenium_script(req.testcase, html_path=html_path, collection_name=project.get('chroma_collection_name'))
+        # Engine-aware generation — uses Playwright or Selenium based on BROWSER_ENGINE flag
+        script = generate_automation_script(
+            req.testcase,
+            html_path=html_path,
+            collection_name=project.get('chroma_collection_name'),
+            project_id=project.get('id'),
+        )
         
         # Save script to database with project_id
         test_id = req.testcase.get('test_id')
@@ -174,6 +183,7 @@ def create_script(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/selenium-scripts")
+@router.get("/playwright-scripts")
 def get_all_scripts(
     project: dict = Depends(get_current_project),
     current_user = Depends(get_current_user)
@@ -195,6 +205,7 @@ def get_all_scripts(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/selenium-scripts/{test_case_id}")
+@router.get("/playwright-scripts/{test_case_id}")
 def get_script_by_id(
     test_case_id: str,
     project: dict = Depends(get_current_project),

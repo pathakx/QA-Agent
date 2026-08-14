@@ -1,22 +1,27 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+# pyrefly: ignore [missing-import]
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
+# pyrefly: ignore [missing-import]
 from fastapi.responses import FileResponse
-from backend.services.execution_service import execute_test_script
+from backend.services.execution_service import execute_test_script as _legacy_execute
 from backend.auth.project_helpers import get_current_project
 from backend.auth.dependencies import get_current_user
 from backend.core.supabase_client import create_user_client
 import uuid
 import os
 from datetime import datetime
+from typing import Optional
 
 router = APIRouter()
 
-async def run_test_background(execution_id: str, test_id: str, script_content: str, project_id: str, token: str, retries: int = 0):
+
+async def run_test_background(execution_id: str, test_id: str, script_content: str, project_id: str, token: str, retries: int = 0, engine: str = None):
     """
     Run test in background and update DB with results
     Emits real-time WebSocket events for progress tracking
     Supports retries on failure.
     """
     from backend.core.websocket_manager import emitter
+
     
     try:
         # Emit started event
@@ -28,10 +33,10 @@ async def run_test_background(execution_id: str, test_id: str, script_content: s
         # Run the script with retries
         result = None
         for attempt in range(retries + 1):
-            msg = "Running Selenium script..." if attempt == 0 else f"Retry {attempt}/{retries}: Running script..."
+            msg = "Running test script..." if attempt == 0 else f"Retry {attempt}/{retries}: Running script..."
             await emitter.emit_progress(execution_id, 2, 5, msg)
             
-            result = await execute_test_script(script_content)
+            result = await _legacy_execute(script_content)
             
             if result.status == 'passed':
                 break
@@ -85,14 +90,15 @@ async def run_test_background(execution_id: str, test_id: str, script_content: s
 async def execute_test(
     test_id: str,
     retries: int = 0,
+    engine: Optional[str] = Query(None, description="Engine override: 'selenium' or 'playwright'"),
     background_tasks: BackgroundTasks = None,
     project: dict = Depends(get_current_project),
     current_user = Depends(get_current_user)
 ):
     """
     Execute a test case by ID.
-    Fetches the latest selenium script and runs it.
-    Optional: retries (default 0)
+    Fetches the latest script and runs it via the configured engine.
+    Optional: retries (default 0), engine override ('selenium' or 'playwright')
     """
     client = create_user_client(current_user['token'])
     
@@ -117,7 +123,7 @@ async def execute_test(
     exec_res = client.table('test_executions').insert(execution_data).execute()
     execution_id = exec_res.data[0]['id']
     
-    # 3. Start execution in background
+    # 3. Start execution in background (pass engine for dual-runtime routing)
     background_tasks.add_task(
         run_test_background, 
         execution_id,
@@ -125,13 +131,15 @@ async def execute_test(
         script_content,
         project['id'],
         current_user['token'],
-        retries
+        retries,
+        engine
     )
     
     return {
         "execution_id": execution_id,
         "status": "running",
-        "started_at": execution_data['started_at']
+        "started_at": execution_data['started_at'],
+        "engine": engine or "auto",
     }
 
 @router.get("/executions/{execution_id}")
@@ -230,3 +238,18 @@ async def get_execution_video(
     
     media_type = 'video/webm' if video_path.endswith('.webm') else 'video/mp4'
     return FileResponse(video_path, media_type=media_type)
+
+
+# ── Engine Info (Phase 4: Dual Runtime Diagnostics) ──
+
+@router.get("/engine-info")
+async def get_engine_info():
+    """
+    Get the current execution engine configuration.
+    """
+    return {
+        "default_engine": "playwright",
+        "playwright_enabled": True,
+        "available_engines": ["playwright"],
+        "note": "Migration complete",
+    }

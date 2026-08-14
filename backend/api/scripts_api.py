@@ -7,7 +7,7 @@ from backend.core.supabase_client import create_user_client
 
 router = APIRouter()
 
-class SeleniumScript(BaseModel):
+class PlaywrightScript(BaseModel):
     test_case_id: str
     script_content: str
 
@@ -23,11 +23,11 @@ def get_scripts(
 
 @router.post("/", response_model=dict)
 def create_or_update_script(
-    script: SeleniumScript,
+    script: PlaywrightScript,
     project: dict = Depends(get_current_project),
     user: dict = Depends(get_current_user)
 ):
-    """Create or update a Selenium script for a test case"""
+    """Create or update a Playwright script for a test case"""
     client = create_user_client(user['token'])
     
     data = script.dict()

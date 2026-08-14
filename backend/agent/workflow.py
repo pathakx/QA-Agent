@@ -1,7 +1,7 @@
 from typing import TypedDict, List, Annotated
 import operator
+# pyrefly: ignore [missing-import]
 from langgraph.graph import StateGraph, END
-from backend.services.execution_service import execute_test_script
 from backend.core.supabase_client import get_supabase_client
 from backend.core.websocket_manager import emitter
 import json
@@ -40,7 +40,7 @@ async def analyze_project(state: AgentState):
             
         # Retrieve Knowledge Base status
         from backend.services.kb_service import get_kb_status
-        from backend.services.selenium_service import load_ui_elements
+        from backend.services.playwright_service import load_ui_elements
         
         # Fetch confirmed project HTML file from DB
         html_file = client.table('kb_files').select('storage_path').eq('project_id', state['project_id']).eq('file_type', 'html').limit(1).execute()
@@ -238,13 +238,14 @@ Format:
         return {"errors": [f"Test plan generation failed: {str(e)}"]}
 
 async def generate_scripts(state: AgentState):
-    """Generate Selenium scripts for each test case"""
+    """Generate automation scripts for each test case (engine-aware)."""
     print("Generating Scripts...")
     scripts = []
     try:
-        await emitter.emit_agent_log(state['project_id'], "💻 Generating automation scripts...")
+        await emitter.emit_agent_log(state['project_id'], "Generating automation scripts...")
         
-        from backend.services.selenium_service import generate_selenium_script
+        from backend.automation.script_gen import generate_script as _generate_script
+        
         from backend.core.supabase_client import create_user_client
         client = create_user_client(state['access_token'])
         
@@ -276,7 +277,11 @@ async def generate_scripts(state: AgentState):
                 
                 # Run sync generation in executor to non-block event loop
                 loop = asyncio.get_event_loop()
-                script_content = await loop.run_in_executor(None, generate_selenium_script, test, html_path, collection_name)
+                script_content = await loop.run_in_executor(
+                    None, _generate_script, test, html_path, collection_name,
+                    None,  # engine 
+                    state['project_id'],  # project_id
+                )
                 
                 # Save to DB
                 try:
@@ -293,7 +298,7 @@ async def generate_scripts(state: AgentState):
                 "content": script_content
             })
             
-        await emitter.emit_agent_log(state['project_id'], f"✅ Ready with {len(scripts)} scripts.")
+        await emitter.emit_agent_log(state['project_id'], f"Ready with {len(scripts)} scripts.")
         return {"generated_scripts": scripts}
     except Exception as e:
         return {"errors": [f"Script generation failed: {str(e)}"]}
@@ -307,7 +312,7 @@ async def execute_tests(state: AgentState):
             await emitter.emit_agent_log(state['project_id'], "⚠️ No scripts to execute.")
             return {"execution_results": []}
 
-        await emitter.emit_agent_log(state['project_id'], "🚀 Starting test execution...")
+        await emitter.emit_agent_log(state['project_id'], "Running test execution...")
         
         from backend.services.execution_service import execute_test_script
         
@@ -316,8 +321,12 @@ async def execute_tests(state: AgentState):
             await emitter.emit_agent_log(state['project_id'], f"Running {test_id}...")
             print(f"Executing {test_id}...")
             
-            # Execute script
-            result = await execute_test_script(script['content'])
+            # Execute script (routes through dual engine if Playwright is enabled)
+            result = await execute_test_script(
+                script['content'],
+                project_id=state['project_id'],
+                test_id=test_id,
+            )
             
             status_icon = "✅" if result.status == 'passed' else "❌"
             await emitter.emit_agent_log(state['project_id'], f"{status_icon} {test_id}: {result.status}")
@@ -381,7 +390,7 @@ async def fix_failures(state: AgentState):
     await emitter.emit_agent_log(state['project_id'], f"🔧 Attempting to fix {len(failed_tests)} failed tests...")
     
     from backend.core.llm_client import LLMClient
-    from backend.services.selenium_service import generate_selenium_script, build_prompt
+    from backend.automation.script_gen import get_prompt as _get_repair_prompt
     from backend.core.supabase_client import create_user_client
     
     llm = LLMClient()
@@ -401,22 +410,12 @@ async def fix_failures(state: AgentState):
             
         await emitter.emit_agent_log(state['project_id'], f"  - Fixing {test_id}...")
         
-        # Prompt for fixing
-        # We assume the test case scenario is correct, but script failed. 
-        # But user said "generate test cases and script".
-        # We will keep the scenario but Ask LLM to re-write script considering the error.
-        
-        # We temporarily inject the error into the test case for the prompt builder?
-        # A clearer way is to just call generate_selenium_script but maybe modify the function?
-        # For simplicity/efficiency, we will just RE-GENERATE the script. 
-        # Often failures are due to transient issues or bad selectors. 
-        # A fresh generation might not help unless we give feedback.
-        
-        # Let's use a specialized repair prompt manually here
-        # from backend.services.selenium_service import build_prompt (moved to imports)
         html_path = state.get('html_path')
         collection_name = state.get('chroma_collection_name')
-        base_prompt = build_prompt(test_case, html_path=html_path, collection_name=collection_name)
+        project_id = state.get('project_id')
+
+        # Use engine-aware base prompt (Playwright or Selenium depending on active engine)
+        base_prompt = _get_repair_prompt(test_case, html_path=html_path, collection_name=collection_name, project_id=project_id)
         
         repair_prompt = f"""
         {base_prompt}
@@ -429,8 +428,9 @@ async def fix_failures(state: AgentState):
         The previous script failed with the error above. 
         Analyze the failure. 
         Re-write the script to fix this specific error.
-        If it was a Timeout, increase waits.
-        If it was a generic error, add more robust error handling or check selectors.
+        If it was a Timeout, use longer explicit waits.
+        If it was a selector error, try alternative selectors (role, label, placeholder, text).
+        If it was a generic error, add more robust error handling.
         """
         
         # LLMClient.generate is synchronous, run in executor

@@ -1,4 +1,3 @@
-import google.generativeai as genai
 from openai import OpenAI
 from backend.core.config import settings
 
@@ -15,7 +14,7 @@ class LLMClient:
                 base_url="https://api.groq.com/openai/v1"
             )
             self.model_name = "llama-3.3-70b-versatile"
-            print(f"✅ Initialized Groq LLM (model: {self.model_name})")
+            print(f"[OK] Initialized Groq LLM (model: {self.model_name})")
         else:
             raise ValueError(f"Unsupported LLM provider: {self.provider}. Only 'groq' is supported.")
 

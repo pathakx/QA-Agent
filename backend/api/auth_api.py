@@ -2,10 +2,11 @@
 Authentication API endpoints
 Handles user profile and session management
 """
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from backend.auth.dependencies import get_current_user
-from backend.core.supabase_client import supabase, create_user_client
+from backend.core.supabase_client import create_user_client
 
 router = APIRouter()
 

@@ -30,3 +30,5 @@ services:
       # SUPABASE_ANON_KEY
       # SUPABASE_SERVICE_KEY
       # GROQ_API_KEY
+      # PINECONE_API_KEY
+      # PINECONE_INDEX_NAME

@@ -17,5 +17,7 @@ aiofiles
 opencv-python-headless
 apscheduler
 chromadb
+pinecone-client
+transformers
 playwright
 requests

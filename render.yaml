@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: qa-agent-backend
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: |
+      pip install -r requirements.txt
+      python -m playwright install chromium --with-deps
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: LLM_PROVIDER
+        value: groq
+      - key: BROWSER_ENGINE
+        value: playwright
+      - key: PLAYWRIGHT_ENABLED
+        value: "true"
+      - key: PLAYWRIGHT_ROLLOUT_PCT
+        value: "100"
+      - key: PLAYWRIGHT_VIDEO
+        value: "false"
+      - key: PLAYWRIGHT_TRACING
+        value: "false"
+      - key: VECTOR_DB_DIR
+        value: ./chroma_db
+      # Set these as Secret Env Vars in Render Dashboard:
+      # SUPABASE_URL
+      # SUPABASE_ANON_KEY
+      # SUPABASE_SERVICE_KEY
+      # GROQ_API_KEY

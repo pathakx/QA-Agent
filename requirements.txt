@@ -1,25 +1,21 @@
-streamlit
-requests
-pandas
 fastapi
-uvicorn
+uvicorn[standard]
 python-multipart
 pymupdf
 beautifulsoup4
-pinecone
 sentence-transformers
 pydantic
 python-dotenv
-google-generativeai
 openai
+groq
 sqlalchemy
 supabase
-
 pillow
 python-socketio
 aiofiles
-opencv-python
+# opencv-python causes build failure on headless servers (no display)
+opencv-python-headless
 apscheduler
-# ── Playwright Migration (Phase 1) ──
-# Install browsers after pip install: python -m playwright install chromium
+chromadb
 playwright
+requests

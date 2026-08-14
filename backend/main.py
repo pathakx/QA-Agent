@@ -91,8 +91,9 @@ async def serve_frontend(full_path: str):
     if os.path.isfile(potential_file_path):
         return FileResponse(potential_file_path)
     
-    # Serve index.html for all other routes (SPA fallback)
-    return FileResponse(os.path.join(static_dir, "index.html"))
+    # Since the frontend is now hosted separately on Vercel, 
+    # we just return a simple status message for the root route.
+    return JSONResponse(status_code=200, content={"status": "QA Agent API is running", "message": "Frontend is hosted separately."})
 
 if __name__ == "__main__":
     import uvicorn

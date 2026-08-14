@@ -47,6 +47,7 @@ Thumbs.db
 # Node
 node_modules/
 npm-debug.log
+/package-lock.json
 
 # Test files
 test_*.py
